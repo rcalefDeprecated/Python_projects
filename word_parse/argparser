@@ -1,0 +1,42 @@
+#! /usr/bin/env python3.3
+import argparse
+import sys
+
+def main(args):
+	argparser = argparse.ArgumentParser(description = ("Reads input from std"
+		"in, splits input into words containing alphabetic char"
+		"acters, and returns pairs of words along with their"
+		" number of occurences in the input"))
+	asc_or_desc = argparser.add_mutually_exclusive_group(
+		required=True)
+	asc_or_desc.add_argument('--ascend', action = 'append_const',
+		const = 2, dest = 'order', help = ("Returns output "
+		"sorted in ascending order by counts of occurrences."))
+	asc_or_desc.add_argument('--descend', action = 'append_const',
+		const = 4, dest = 'order', help = ("Returns output "
+		"sorted in descending order by counts of occurrences."))
+	argparser.add_argument('--alpha', action = 'append_const',
+		const = 1, dest = 'order', help =("Returns output "
+		"sorted alphabetically by word. If specified along"
+		"with --descend, output is sorted in reverse alpha"
+		"betic order. Specifying --alpha and --ascend gives"
+		"the same results as only --alpha."))
+	options = argparser.parse_args()
+	print(vars(options))
+	order = 0
+	alpha = False
+	dir = ""
+	for num in options.order:
+		order += num
+	print(order)
+	if 0b1 & order:
+		alpha = True
+	if 0b10 & order:
+		dir += 'ascend'
+	if 0b100 & order:
+		dir += 'descend'
+	print(alpha)
+	print(dir)
+
+if __name__ == "__main__":
+	sys.exit(main(sys.argv))
