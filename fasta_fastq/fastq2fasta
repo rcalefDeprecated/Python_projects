@@ -1,0 +1,61 @@
+#! /usr/bin/env python
+import sys
+import re
+import collections
+import operator
+import argparse
+
+import fasta_fastq_parser
+
+
+def parse_arg(args):
+	argparser = argparse.ArgumentParser(description = ("Converts a FASTQ"
+		"file into a FASTA file, optionally outputting quality scores"
+		"in a separate '.qual' file."))
+	score_format = argparser.add_mutually_exclusive_group(
+		required=True)
+	score_format.add_argument('--33', action = 'store_false',
+		dest = 'phred64', help = ("Specifies that FASTQ quality"
+		" scores are encoded in Phred+33 format."))
+	score_format.add_argument('--64', action = 'store_true',
+		dest = 'phred64', help = ("Specifies that FASTQ quality"
+		" scores are encoded in Phred+64 format."))
+	argparser.add_argument('--in', action = 'store',dest='in_file',
+		help =("Name of FASTQ file to be read in."))
+	argparser.add_argument('--out',action='store', 
+	        help=("Desired name of FASTA output file. Will"
+	        " overwrite existing file of the same name."))
+	argparser.add_argument('--qual',action='store',
+	        help=("Desired name of '.qual' output file "
+	        "containing quality scores from FASTQ input."
+		" Can be omitted to discard quality information."))
+	options = argparser.parse_args()
+	print(vars(options))
+	return options
+	
+
+def main(args):
+	opts=parse_arg(args)
+	fastq_in = open(opts.in_file,'r')
+	fasta_out = open(opts.out, 'w')
+	qual_out = None
+	if not opts.qual is None: qual_out = open(opts.qual,'w')
+	for sequence in fasta_fastq_parser.read_fastq(fastq_in):
+		fasta_out.write("\n>%s   %s\n%s" % (sequence.identifier
+		     ,sequence.comment,sequence.sequence))
+		if not qual_out is None:
+			qual_out.write(">%s   %s\n" % 
+			   (sequence.identifier,sequence.comment))
+			for score in sequence.scores:
+				qual_out.write("%s " % (int(score)))
+			qual_out.write("\n")
+#		for i in range(len(sequence.sequence)):
+#			if i % 80 == 0: print
+#			sys.stdout.write(sequence.sequence[i])
+#                print
+#	print_dict(words, order)
+
+
+
+if __name__ == "__main__":
+	sys.exit(main(sys.argv))
