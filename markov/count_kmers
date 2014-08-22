@@ -1,0 +1,36 @@
+#! /usr/bin/env python
+import sys
+import re
+import argparse
+import sys
+from collections import Counter
+
+from fasta_fastq_parser import read_fasta
+from markov import count_kmers
+
+
+def parse_arg(args):
+	argparser = argparse.ArgumentParser(description = ("Counts number of"
+		" k-mers in a FASTA sequence or sequences, and outputs a list"
+		" of k-mers and their respective counts."))
+	argparser.add_argument('--order', action = 'store',required=True,
+		help =("Specifies order of the model, or k-1."))
+	argparser.add_argument('--alphabet',action='store', 
+	        help=("Specifies the alphabet of valid characters in the"
+	        " FASTA sequences, any other characters will be ignored."))
+	options = argparser.parse_args()
+	print(vars(options))
+	return options
+	
+
+def main(args):
+	opts=parse_arg(args)
+	total_counts = Counter()
+	for sequence in read_fasta(sys.stdin):
+		temp=count_kmers(sequence.sequence,int(opts.order),'^','$',opts.alphabet)
+		total_counts += temp
+	print total_counts
+
+
+if __name__ == "__main__":
+	sys.exit(main(sys.argv))
