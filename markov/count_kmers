@@ -3,7 +3,9 @@ import sys
 import re
 import argparse
 import sys
+import string
 from collections import Counter
+from operator import itemgetter
 
 from fasta_fastq_parser import read_fasta
 from markov import count_kmers
@@ -16,20 +18,50 @@ def parse_arg(args):
 	argparser.add_argument('--order', action = 'store',required=True,
 		help =("Specifies order of the model, or k-1."))
 	argparser.add_argument('--alphabet',action='store', 
+		default=string.ascii_uppercase,
 	        help=("Specifies the alphabet of valid characters in the"
 	        " FASTA sequences, any other characters will be ignored."))
-	options = argparser.parse_args()
-	print(vars(options))
-	return options
+	argparser.add_argument('--start', action = 'store',default='^',
+		help =("Specifies the character to be used to represent"
+		" the beginning of a sequence."))
+	argparser.add_argument('--stop', action = 'store',default='$',
+		help =("Specifies the character to be used to represent"
+		" the end of a sequence."))
+	argparser.add_argument('--sort-by-count',action='store_true',
+		dest='count_sort',help=("Output k-mer/count pairs "
+		"sorted by count in descending order. Default is "
+		"sorted in lexicographic order."))
+	opts = argparser.parse_args()
+	print(vars(opts))
+	return opts
 	
+def check_alphabet(opts):
+        if opts.start in opts.alphabet:
+                sys.stderr.write("WARNING: Alphabet contains start character.\n")
+        if opts.stop in opts.alphabet:
+                sys.stderr.write("WARNING: Alphabet contains stop character.\n")
+	allowed_chars = set(string.printable)-set(string.whitespace)
+	if not set(opts.alphabet) <= allowed_chars:
+		sys.stderr.write("WARNING: Alphabet contains either whitespace "
+				 "characters, or non-printable characters.")
+
+def print_counts(counts,sort_by_counts):
+	if sort_by_counts: 
+		sorted_counts = sorted(counts.items(),key=itemgetter(1),reverse=True)
+	else:
+		sorted_counts = sorted(counts.items(),key=itemgetter(0))
+	for entry in sorted_counts:
+		print("%s %g" % (entry[0], entry[1]))
 
 def main(args):
 	opts=parse_arg(args)
+	check_alphabet(opts)
 	total_counts = Counter()
 	for sequence in read_fasta(sys.stdin):
-		temp=count_kmers(sequence.sequence,int(opts.order),'^','$',opts.alphabet)
+		temp=count_kmers(sequence.sequence,int(opts.order),
+			opts.start,opts.stop,opts.alphabet)
 		total_counts += temp
-	print total_counts
+	print_counts(total_counts,opts.count_sort)
 
 
 if __name__ == "__main__":

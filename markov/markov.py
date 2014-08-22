@@ -1,9 +1,8 @@
 #! /usr/bin/env python
-from collections import Counter
 import string
+from collections import Counter
 
 def count_kmers(sequence,order,start,stop,alphabet):
-	if alphabet is None: alphabet = string.ascii_uppercase
 	alphabet = alphabet + start + stop
 	alphabet = set(alphabet)
 	counts = Counter()
