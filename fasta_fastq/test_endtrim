@@ -1,0 +1,11 @@
+#/bin/sh
+
+./endtrim --in_33 tiny.fq33 --out_64 test.fq64 --min_qual 30
+./endtrim --in_64 tiny.fq64 --out_33 test.fq33 --min_qual 30
+./endtrim --in_fasta tiny.fa --in_qual tiny.qual --out_fasta test.fa --out_qual test.qual  --min_qual 30
+./endtrim --in_33 - --out_64 test_stdin.fq64 --min_qual 30 < tiny.fq33
+diff test.fq64 trimmed.fq64 > 64.diff
+diff test.fq33 trimmed.fq33 > 33.diff
+diff test.fa trimmed.fa > fa.diff
+diff test.qual trimmed.qual > qual.diff 
+diff test_stdin.fq64 trimmed.fq64 > stdin.diff

@@ -1,0 +1,172 @@
+#! /usr/bin/env python2.7
+from __future__ import print_function
+import sys
+import re
+import collections
+import operator
+import argparse
+
+from fasta_fastq_parser import fastq_seq,read_fastq, read_fasta_with_quality
+
+class output_container:
+    def __init__(self,out33,out64,out_fasta,out_qual):
+        self.out_33=out33
+        self.out_64=out64
+        self.out_fasta=out_fasta
+        self.out_qual=out_qual
+
+def input_type(filename):
+    if filename == "-": return sys.stdin
+    else: return open(filename, 'r')
+
+def parse_arg(args):
+    argparser = argparse.ArgumentParser(description = ("Converts a FASTA"
+        "file, along with a separate '.qual' file containing quality "
+            "information in a FASTA-like format, into a FASTQ file. The "
+        "'.qual' file must contain the same number of entries as the"
+            " FASTA file, with each entry beginning with the same header"
+            " as it's corresponding FASTA sequence. Quality information "
+        "must be encoded as decimal numbers, not ASCII characters."))
+    input_format = argparser.add_mutually_exclusive_group()
+    input_format.add_argument('--in_33', action = 'store',
+        type=input_type,
+        dest = 'in_33', help = ("Specifies the name of an input FASTQ "
+        "file with scores in Phred+33 format."))
+    input_format.add_argument('--in_64', action = 'store',
+        type = input_type,
+        dest = 'in_64', help = ("Specifies the name of an input FASTQ "
+        "file with scores in Phred+64 format."))
+    input_format.add_argument('--in_fasta', action = 'store',
+        type = input_type,
+        dest = 'in_fasta', help = ("Specifies the name of "
+            "the input FASTA file. Requires a file with numerical quality "
+            "scores specified by --in_qual."))
+    argparser.add_argument('--in_qual', action = 'store',
+        type = input_type,
+        dest = 'in_qual', help =("Specifies the name of "
+            "the input quality file containing numerical scores "
+            "corresponding to the FASTA sequences specified by "
+            "--in_fasta."))
+    output_format = argparser.add_argument_group()
+    output_format.add_argument('--out_33', action = 'store',
+       type = argparse.FileType('w'),
+       dest = 'out_33', help = ("Outputs sequence information in "
+       "FASTQ format with Phred+33 scores to the specified file."))
+    output_format.add_argument('--out_64', action = 'store',
+        type = argparse.FileType('w'),
+        dest = 'out_64', help = ("Outputs sequence information in "
+        "FASTQ format with Phred+64 scores to the specified file."))
+    output_format.add_argument('--out_fasta', action = 'store',
+        type = argparse.FileType('w'),
+        dest = 'out_fasta', help = ("Outputs sequences in FASTA format "
+        "to the specified file."))
+    output_format.add_argument('--out_qual', action = 'store',
+        type = argparse.FileType('w'),
+        dest = 'out_qual', help =("Outputs sequence quality scores in "
+        "numerical format to the specified file."))
+    argparser.add_argument('--min_qual',action='store', dest="min_qual",
+        type = int,
+        required=True, help=("Minimum quality score, if a base with a "
+            "lower quality score is found, then all bases at that "
+            "position or later will be trimmed off of the sequence."))
+    options = argparser.parse_args()
+    return options
+
+def open_file(filename,mode):
+    file_handle=""
+    try:
+        file_handle = open(filename, mode)
+    except (OSError,IOError) as e:
+        print("ERROR File not found: %s" % (filename),file=sys.stderr)
+        sys.exit(1)
+    return file_handle
+
+def get_input_sequences(opts):
+    seq_parser = read_fastq(sys.stdin,33)
+    if opts.in_33 is not None:
+        seq_parser = read_fastq(opts.in_33,33)
+    if opts.in_64 is not None:
+        seq_parser = read_fastq(opts.in_64,64)
+    if opts.in_fasta is not None:
+        if opts.in_qual is None:
+            print("FASTA input file requires a quality score file"
+            " to be specified with --in_qual.", file=sys.stderr)
+            sys.exit(1)
+        elif opts.in_qual == opts.in_fasta:
+            print("FASTA input file and quality score file cannot"
+                  " be same file (both cannot come from stdin).")
+            sys.exit(1)
+        seq_parser = read_fasta_with_quality(opts.in_fasta,opts.in_qual)
+    return seq_parser
+
+def get_outputs(opts):
+    out33 = out64 = out_fasta = out_qual = None
+    default_output=True
+    if opts.out_33 is not None:
+        out33 = opts.out_33
+	default_output=False
+    if opts.out_64 is not None:
+        out64 = opts.out_64
+        default_output=False
+    if opts.out_fasta is not None:
+        out_fasta = opts.out_fasta
+        default_output=False
+    if opts.out_qual is not None:
+        out_qual = opts.out_qual
+        default_output=False
+    if default_output:
+        out33 = sys.stdout
+    return output_container(out33,out64,out_fasta,out_qual)
+
+def write_fastq(seq,offset,output):
+    output.write("@%s %s\n%s\n+%s %s\n" % (seq.identifier,seq.comment
+        ,seq.sequence,seq.identifier,seq.comment))
+    for score in seq.scores:
+        output.write(chr(score + offset))
+    output.write("\n")
+
+
+def write_sequence(seq,outputs):
+    if outputs.out_33 is not None:
+        write_fastq(seq,33,outputs.out_33)
+    if outputs.out_64 is not None:
+        write_fastq(seq,64,outputs.out_64)
+    if outputs.out_fasta is not None:
+        outputs.out_fasta.write(">%s %s\n%s\n" % (seq.identifier,seq.comment,seq.sequence))
+    if outputs.out_qual is not None:
+        outputs.out_qual.write(">%s %s\n" % (seq.identifier, seq.comment))
+        for score in seq.scores:
+            outputs.out_qual.write("%d " % (score))
+        outputs.out_qual.write("\n")
+
+def cleanup(outputs):
+    if outputs.out_33 is not None:
+        outputs.out_33.close()
+    if outputs.out_64 is not None:
+        outputs.out_64.close()
+    if outputs.out_fasta is not None:
+        outputs.out_fasta.close()
+    if outputs.out_qual is not None:
+        outputs.out_qual.close()
+
+    
+
+def main(args):
+    opts = parse_arg(args)
+    cutoff = int(opts.min_qual)
+    input_seqs = get_input_sequences(opts)
+    output_streams = get_outputs(opts)
+    for seq in input_seqs:
+        i=0 
+        for score in seq.scores:
+            if score < cutoff: break
+            i += 1
+	print(i)
+        trimmed_seq = seq.sequence[0:i]
+        trimmed_scores = seq.scores[0:i]
+        write_sequence(fastq_seq(seq.comment,seq.identifier,trimmed_seq,trimmed_scores), output_streams)
+    cleanup(output_streams)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
