@@ -92,7 +92,7 @@ def get_input_sequences(opts):
             print("FASTA input file requires a quality score file"
             " to be specified with --in_qual.", file=sys.stderr)
             sys.exit(1)
-        elif opts.in_qual == opts.in_fasta:
+        elif opts.in_qual.name == opts.in_fasta.name:
             print("FASTA input file and quality score file cannot"
                   " be same file (both cannot come from stdin).")
             sys.exit(1)
