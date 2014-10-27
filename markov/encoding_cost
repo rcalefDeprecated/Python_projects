@@ -1,0 +1,144 @@
+#! /usr/bin/env python
+import sys
+import re
+import argparse
+import sys
+import string
+from math import log
+from collections import Counter
+from operator import itemgetter
+
+from fasta_fastq_parser import read_fasta
+from markov import get_kmers
+from markov import kmers_from_sequence
+
+k=0
+
+def parse_arg(args):
+	argparser = argparse.ArgumentParser(description = ("Counts number of"
+		" k-mers in a FASTA sequence or sequences, and outputs a list"
+		" of k-mers and their respective counts."))
+	argparser.add_argument('--order', action = 'store',required=True,
+		help =("Specifies order of the model, or k-1."))
+	argparser.add_argument('--alphabet',action='store', 
+		default=string.ascii_uppercase,
+	        help=("Specifies the alphabet of valid characters in the"
+	        " FASTA sequences, any other characters will be ignored."))
+	argparser.add_argument('--start', action = 'store',default='^',
+		help =("Specifies the character to be used to represent"
+		" the beginning of a sequence."))
+	argparser.add_argument('--stop', action = 'store',default='$',
+		help =("Specifies the character to be used to represent"
+		" the end of a sequence."))
+	argparser.add_argument('--sort-by-count',action='store_true',
+		dest='count_sort',help=("Output k-mer/count pairs "
+		"sorted by count in descending order. Default is "
+		"sorted in lexicographic order."))
+	argparser.add_argument('--fasta', action='store',required=True)
+	argparser.add_argument('--train',action='store')
+	opts = argparser.parse_args()
+#	print(vars(opts))
+	return opts
+	
+def check_alphabet(opts):
+        if opts.start in opts.alphabet:
+                sys.stderr.write("WARNING: Alphabet contains start character.\n")
+        if opts.stop in opts.alphabet:
+                sys.stderr.write("WARNING: Alphabet contains stop character.\n")
+	allowed_chars = set(string.printable)-set(string.whitespace)
+	if not set(opts.alphabet) <= allowed_chars:
+		sys.stderr.write("WARNING: Alphabet contains either whitespace "
+				 "characters, or non-printable characters.")
+
+def print_counts(counts,sort_by_counts):
+	if sort_by_counts: 
+		sorted_counts = sorted(counts.items(),key=itemgetter(1),reverse=True)
+	else:
+		sorted_counts = sorted(counts.items(),key=itemgetter(0))
+	for entry in sorted_counts:
+		print("%s %g" % (entry[0], entry[1]))
+
+def read_counts(alphabet,counts,stop):
+	global k
+	total=0
+	for line in sys.stdin:
+		kmer_count=line.split()
+		kmer=kmer_count[0]
+		count=kmer_count[1]
+		for letter in kmer:
+			if letter not in alphabet:
+				alphabet.add(letter)
+		if (stop * 2) in kmer:
+			continue
+		counts[kmer] = int(count)
+		total += int(count)
+	k = len(kmer)
+	return total
+
+def add_pseudocounts(k,counts,alphabet,start,stop,total):
+	for kmer in get_kmers(start,stop,alphabet,k):
+		if (stop*2) in kmer: continue
+		counts[kmer]+=1
+		total+=1
+	return total
+
+def get_coding_cost(sequence,alphabet,log_probs,k,start,stop):
+	cost=0.0
+	num_chars=0
+	if k==1:
+		sequence = start + string.upper(sequence) + stop
+	else:
+		sequence= (start * (k-1)) + string.upper(sequence) + stop
+	alphabet.add(start)
+	alphabet.add(stop) 
+	for kmer in kmers_from_sequence(sequence,alphabet,k):
+		cost += log_probs[kmer]
+		num_chars +=1
+	return (num_chars,cost)
+
+def main(args):
+	opts=parse_arg(args)
+	alphabet=set(opts.alphabet)
+	counts=Counter()
+	fasta_file = open(opts.fasta,'r')
+	train_file = open(opts.train,'r')
+	total=read_counts(alphabet,counts,opts.stop)
+	global k
+	alphabet.discard(opts.start)
+	alphabet.discard(opts.stop)
+#	total=add_pseudocounts(k,counts,alphabet,opts.start,opts.stop,total)
+	print_counts(counts,False)
+	log_probs = dict(counts)
+	tot_prob = 0
+	for key, value in log_probs.items():
+		log_probs[key] = -log(float(value)/total,2)
+		tot_prob += float(value)/total
+	print(tot_prob)
+	cost=0.0
+	tot_chars=0
+	num_sequences=0
+	per_char_costs=0
+	for fasta_seq in read_fasta(fasta_file):
+		data = get_coding_cost(fasta_seq.sequence,alphabet,log_probs,k,opts.start,opts.stop)
+		tot_chars += data[0] 
+		cost += data[1]
+		per_char_costs += (data[1]/data[0]-1)
+		num_sequences +=1
+	print(cost/(tot_chars*k))
+	print(per_char_costs/num_sequences)
+        cost=0.0
+        tot_chars=0
+        num_sequences=0
+        per_char_costs=0
+        for fasta_seq in read_fasta(train_file):
+                data = get_coding_cost(fasta_seq.sequence,alphabet,log_probs,k,opts.start,opts.stop)
+                tot_chars += data[0] 
+                cost += data[1]
+		per_char_costs += (data[1]/data[0]-1)
+		num_sequences +=1
+	print(cost/(tot_chars*k))
+	print (per_char_costs/num_sequences)
+	
+
+if __name__ == "__main__":
+	sys.exit(main(sys.argv))
