@@ -1,0 +1,520 @@
+#! /usr/bin/env python
+"""Uses a stochastic model of palindromes to identify under- or over-represented palindromes in FASTA input data.
+
+score_palindromes
+BME 205 Fall 2014, Programming Assignment #4
+November 7th, 2014
+Robert Calef
+
+score_palindromes is intended to identify under- or over-represented palindromes in a
+prokaryotic genome. This program takes in DNA sequence data in FASTA format, and uses 
+a basic stochastic model of palindromes to calculate an expected number of occurences 
+of some palindrome in the input data from kmer counts. This expected value is then 
+compared to the actual observed number of occurences of the palindrome to establish 
+whether or not the palindrome occurs more or less frequently than expected. 
+
+In addition to allowing the typical even length palindromes of the form:
+                          ABCC'B'A' 
+where X' indicates the complement of X. We also allow for odd palindromes which are of 
+the form:
+                          ABCYC'B'A'
+where Y is one of the two wildcards specifying base pairing nucleotides, W for A or T, 
+and S for C or G.
+
+score_palindromes also supports multiple input files, merging kmer counts across all
+files, and then performing the final analysis over all the input data. Additionally,
+data can also be read in from gzipped files, detected by the ".gz" suffix, or from
+stdin if '-' is given as a filename.
+
+Output will begin with a header line starting with the '#' character, followed by 
+palindrome representation data, one line per palindrome, sorted in ascending order
+by Z-Score. This sorting causes the most under-represented palindromes to appear at
+the top of the output, and the most over-represented palindromes to appear at the 
+bottom of the output. Each line contains the following tab-delimited fields:
+           palindrome_name   observed_count   expected_count   z_score    e_value
+
+            palindrome     - The DNA palindrome for which statistics were calcuated. 
+            count          - The number of times the 'palindrome' was observed in the 
+                             input data.
+            expected_count - The expected count of occurences of 'palindrome' in the 
+                             input data.
+            z_score        - A float specifying the Z-score for the observed count of
+                             occurences of 'palindrome' in the input data. 
+            e_value        - The expected number of tested hypotheses that would have a 
+                             more extreme z-score, where each palindrome represents two
+                             hypotheses, under- or over-represented
+   Example output:
+
+     #Palindrome  Observed Count  Expected Count  Z-Score  E-Value
+         GTTAAC               19        336.7069 -17.3157 6.874e-65
+         GAATTC              302        668.6205 -14.1810 2.307e-43
+         TAATTA              916       1410.2788 -13.1670 2.609e-37
+         ...
+        AGAWTCT              266        211.7111  3.7313 0.03657
+        ATAWTAT              693        577.6684  4.7993 0.0003057
+        GGGSCCC               19          6.1272  5.2005 3.816e-05
+
+
+For a detailed description of the available command-line options, see the help message
+of this program printed via "score_palindromes --help".
+
+WARNING: This program only considers canonical nucleotide symbols (ACGT) in the input 
+data. Any characters other than "ACGT" will be dropped from the sequences, including 
+degenerate nucleotide symbols. As this will affect kmer counts, be aware of this when
+analyzing the results of this program.
+
+The stochastic model used defines the probability of a palindrome W as:
+  1.           P(W) = P(W[0] | W[1:-1]) * P(W[-1] | W[1:-1]) * P(W[1:-1])
+where W[beginning:end] has the same meaning as it does in Python syntax. We can 
+obtain maximum likelihood estimates of the probabilities on the right of equation 1 
+using kmer counts as follows:
+  2.           P(W[0] | W[1:-1]) = counts[W[0:-1]]/counts[W[1:-1]]
+  3.           P(W[1:-1]) = counts[W[1:-1]]/N
+where counts["AAA"] is the number of times the 3-mer "AAA" was seen in the input data
+and N is the number of positions where a word can occur (we will roughly estimate N
+as the total length of all sequences in the input in basepairs).
+As the expected number of occurences of W is simply E(C(W)=N*P(W), we can write the
+expected number of occurences in terms of kmer counts and simplify to obtain:
+ 4.            E(C(W)) = (counts[W[1:-1] * counts[W[0:-1])/counts[W[1:-1]]
+which is exactly the formula we use to obtain the expected count of occurences below.
+
+To understand why we use Z-scores here, one must make the approximation that each 
+position where a word could occur is independent from other positions, thus when we 
+count the occurences of W in the input data, we are making N independent observations, 
+each of which has an outcome of either W or not W. Hence we can model this counting 
+process as a binomial distribution (one can use the formula for variance in a binomial
+distribution and equations 2 and 3 to obtain the equation used for standard deviation 
+below). Since this program is intended for whole bacterial genomes, N should be very 
+large, and thus the distribution should be well approximated by a normal distribution
+by the Law of Large Numbers.
+
+"""
+from __future__ import print_function
+import sys
+import argparse
+import string
+import gzip
+from collections import Counter
+from operator import itemgetter
+from math import sqrt, erfc
+
+from fasta_fastq_parser import read_fasta
+from palindromes import count_kmer_range, reverse_complement, get_all_dna_palindromes
+
+def gzipFile(filename):
+    """A convenience function used to open a normal or gzipped file, also allowing '-' to signify stdin.
+
+    This function defines a custom type for the argparse.add_argument() function,
+    which serves the same purpose as 'type=argparse.FileType('r')' except with
+    the added functionality of using the gzip module to open gzipped files for reading.
+    Gzipped files are detected by the suffix ".gz" at the end of the filename. If '-'
+    is given as the filename, then sys.stdin will be returned with the assumption that
+    sys.stdin will contain uncompressed data.
+    """
+    if filename == "-": return sys.stdin
+    else: return gzip.GzipFile(filename, 'r') if filename.endswith(".gz") else open(filename,'r')
+
+def parse_arg():
+    """Parses command line arguments, returning appropriate values in a Namespace object.
+
+    parse_arg() takes no inputs, as the parse_args() method accesses the command line 
+    arguments directly. This function constructs an ArgumentParser object with various
+    options specified in the --help message of this program.
+
+    The only required argument is the positional 'fasta' argument specifying the file
+    from which to read sequences and calculate encoding costs. For a detailed description
+    of each option, see the --help message.
+    """
+    argparser = argparse.ArgumentParser(
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description = __doc__)
+    argparser.add_argument('-e','--max_e',action='store', 
+        default=1.0,type=float,
+        help=("Specifies a float to be used as the maximum e-value for palindrome data"
+        " to be printed, that is, only data for palindromes whose observed under- or "
+        "over-representation  are expected to occur 'max_e' or fewer times in the input "
+        "dataset will be printed. Defaults to 1.0 if not specified."))
+    argparser.add_argument('-k','--max_k', action = 'store',required=True,
+        type=int,help =("An integer giving the maximum length of palindromes to calculate"
+        " representation statistics for."))
+    argparser.add_argument('-m','--min_k', action = 'store',required=True,
+        type=int,help =("An integer specifying the minimum length of palindromes to "
+        "calculate representation statistics for."))
+    #nargs='+' allows for 1 or more positional file arguments, also note the use of the
+    #gzipFile type defined above.
+    argparser.add_argument('fastas', action='store', default=None,
+        nargs='+',type=gzipFile,help=("The file(s) to read FASTA data from. At least one"
+        " file must be specified. Kmer counts from all the input files will be merged, and"
+        " used to calculate palindrome representation statistcs across all input files. "
+        "Input files can either be normal FASTA files, or gzipped FASTA files, and "
+        "specifying a filename of '-' will read from sys.stdin, expecting uncompressed "
+        "FASTA data."))
+    opts = argparser.parse_args()
+    return opts
+    
+def get_kmer_range_counts(input_file,min_k,max_k):
+    """Takes in an input stream containing FASTA data, returns a Counter object with counts of kmers for a range of k values.
+
+    Inputs:
+        input_file - An input stream containing sequence data in FASTA format.
+                     These sequences will be used to obtain counts of kmer
+                     occurences.
+
+                     WARNING: This function only considers canonical nucleotide
+                     symbols (ACGT) in the input data. Any characters other than
+                     "ACGT" will be dropped from the sequence, including other
+                     degenerate nucleotide symbols. As this will affect kmer
+                     counts, be aware of this if using this function outside
+                     of this program.
+        min_k      - An integer specifying the minimum length of kmers to be
+                     counted.
+        max_k      - An integer specifying the maximum length of kmers to be
+                     counted.
+    Outputs:
+        Returns a tuple (counts,genome_length) containing two pieces of data:
+          counts   - A Counter object containing each kmer's count of occurences
+                     in the data, i.e. counts["AAC"] is an integer specifying the
+                     number of times the 3-mer "AAC" occured in the FASTA data in
+                     'input_file'. Note that 'counts' contains the kmer counts for
+                     all of the specified values of k.
+          length   - An integer specifying the total length in base pairs of all 
+                     the sequences contained in 'input_file'. May be useful for
+                     further calculations.
+
+    PRECONDITION: Both 'min_k' and 'max_k' must be greater than zero, and 'max_k' 
+                  must be greater than 'min_k', otherwise this function will crash 
+                  on a failed assertion. The reason behind this choice is that counting
+                  0-mers has no real meaning, and returning an empty Counter and 0
+                  length if 'min_k' > 'max_k' is likely to confound debugging.
+
+    get_kmer_range_counts counts the occurences of kmers in the FASTA data contained
+    in 'input_stream' for the range    of kmer lengths specified by 'min_k' and 'max_k'.
+    To get counts of kmers for a single value of k, simply use 'min_k' = 'max_k'.
+    """
+    assert(min_k > 0 and max_k > 0)
+    total = Counter()
+    length = 0
+    #For each sequence in the input, we get its kmer counts for the given length range
+    #and merge those counts with our running sum of kmer counts across the whole file.
+    #Similarly, we want to add the length of each individual sequence to the overall
+    #length of the full file in basepairs. Setting alphabet="ACGT" and filter_seqs=True
+    #in read_fasta() causes all characters other than "ACGT" to be dropped from the 
+    #sequence with no warnings being printed.
+    for seq in read_fasta(input_file,alphabet="ACGT",filter_seqs=True):
+        counts = count_kmer_range(seq.sequence,min_k,max_k)
+        total += counts
+        length += len(seq.sequence)
+    return (counts,length)
+
+def calc_palindrome_stats(palindrome,counts,num_positions,num_palindromes):
+    """Receives a DNA palindrome and palindromes data, and returns statistics regarding the palindrome's over- or under-representation.
+
+    Inputs:
+        palindrome      - A string containing the DNA palindrome to calculate
+                          statistics for. If an odd length palindrome, then 'palindrome'
+                          should contain a 'W' or 'S' degenerate nucleotide.
+        counts          - A Counter object containing counts of kmer occurences, that
+                          is, counts["CTA"] should be an integer specifying the number
+                          of times the 3-mer "CTA" was seen in the input data.
+
+                          WARNING: This Counter must contain kmer count data for kmers
+                          of length n, n-1, and n-2 where n is the length of the given
+                          palindrome. These counts are required to calculate the
+                          expected value under the stochastic model described below.
+
+        num_positions   - An integer specifying the total number of positions in
+                          the input data that the given palindrome could have 
+                          occured. For a single linear sequence, this would be:
+                                           L - k + 1
+                          where L is the length of the sequence, and k is the length
+                          of the palindrome, although when L is large and k is small
+                          simply using L provides a decent approximation. For input
+                          data with multiple sequences, one would simply sum the
+                          possible positions over all sequences. This value is used
+                          for calculating the standard deviation of a palindrome's
+                          observed counts from the expected count value.
+        num_palindromes - An integer specifying the total number of palindromes 
+                          being considered for over- or under-representation.
+                          This value is used for obtaining the final e-values
+                          from the calculated p-values.
+    Output:
+        Returns a tuple (palindrome,count,expected_count,std_dev,z_score,p_value,e_value)
+        containing seven pieces of data:
+          palindrome     - A string containing the DNA palindrome for which statistics
+                           were calcuated. Included in the output for ease of keeping
+                           track of which values pertain to which palindromes.
+          count          - An integer specifying the number of times the kmer represented
+                           by 'palindrome' was observed in the input data.
+          expected_count - A float giving the expected value for the count of occurences
+                           of 'palindrome' in the input data, as determined by the 
+                           stochastic model of words defined below.
+          std_dev        - A float giving the standard deviation of 'count' from 
+                           its expected value, 'expected_count'.
+          z_score        - A float specifying the Z-score for the observed count of
+                           occurences of 'palindrome' in the input data. See below
+                           for a brief discussion on the reasoning behind using Z-scores
+                           in this context.
+          p_value        - A float giving the probability of the observed number of 
+                           occurences of 'palindrome', as compared to the expected number
+                           of occurences predicted under the stochastic model.
+          e_value        - A float specifying the expected number of tested hypotheses
+                         that would have a p-value less than or equal to 'p_value'.
+
+    calc_palindrome_stats uses a simple stochastic model of palindromes to obtain an
+    expected count of occurences of 'palindrome' and then compares this expected value
+    to the observed count. For a detailed description of the stochastic model used,
+    see the program docstring.
+    """
+    #We begin by getting the 'count', the number of times 'palindrome' occured in the
+    #input data, along with the expected count and standard deviation, as defined above.
+    count = get_subpalindrome_count(palindrome,counts)
+    expected_count = palindrome_expected_value(palindrome,counts)
+    std_dev = sqrt(expected_count *(1-(expected_count/num_positions)))
+    z_score = (count-expected_count)/std_dev
+    #We use abs() here to either get the probability of a Z-score of greater magnitude
+    #than 'z_score' regardless of whether 'z_score' is positive or negative. Also each
+    #palindrome has two hypotheses, under or over representation, hence the multiplication
+    #by 2 in the calculation of 'e_value'
+    if z_score > 0 : p_value = erfc(z_score/sqrt(2))/2
+    else: p_value = erfc(-z_score/sqrt(2))/2  
+    e_value = 2 * num_palindromes * p_value    
+    return (palindrome,count,expected_count,std_dev,z_score,p_value,e_value)
+
+def get_palindromes_data(counts,num_positions,min_k,max_k):
+    """Receives kmer counts, a length range, and the number of positions where a palindrome could have occured, returns representation data for all DNA palindromes in the length range.
+
+    Inputs:
+       counts         - A Counter object containing counts of kmer occurences, that
+                        is, counts["CTA"] should be an integer specifying the number
+                        of times the 3-mer "CTA" was seen in the input data.
+
+                        WARNING: This Counter must contain kmer count data for kmers
+                        of length min_k, min_k-1, and min_k-2, as these counts are 
+                        required to calculate the expected count of occurences
+                        under the stochastic model described in calc_palindrome_stats().
+
+        num_positions - An integer specifying the total number of positions in
+                        the input data that a palindrome could have occured. 
+                        Since this function accepts a range of palindrome lengths,
+                        a good approximation for this value is simply the total
+                        length in basepairs of all sequences in the input data.
+        min_k         - An integer giving the minimum length of palindromes to
+                        calculate representation statistics for.
+        max_k         - An integer giving the maximum length of palindromes to
+                        calculate representation statistics for.
+      
+    Output:
+        data - A list of tuples containing representation data for all possible DNA
+               palindromes in the specified length range. 'data' contains one tuple
+               for each palindrome with each tuple of the form:
+                 (palindrome,count,expected_count,std_dev,z_score,p_value,e_value)
+          palindrome     - A string containing the DNA palindrome for which statistics
+                           were calcuated. 
+          count          - An integer specifying the number of times the kmer represented
+                           by 'palindrome' was observed in the input data.
+          expected_count - A float giving the expected value for the count of occurences
+                           of 'palindrome' in the input data.
+          std_dev        - A float giving the standard deviation of 'count' from
+                           its expected value, 'expected_count'.
+          z_score        - A float specifying the Z-score for the observed count of
+                           occurences of 'palindrome' in the input data. 
+          p_value        - A float giving the probability of the observed number of
+                           occurences of 'palindrome', as compared to the expected number
+                           of occurences predicted under the stochastic model.
+          e_value        - A float specifying the expected number of tested hypotheses
+                           that would have a p-value less than or equal to 'p_value'.
+        For a more detailed description of the pieces of data contained in each tuple, see
+        the docstring for calc_palindrome_stats()
+
+    get_palindromes_data is essentially a wrapper function for the calc_palindrome_stats()
+    function defined above. get_palindromes_data() takes in kmer counts, a length
+    range of palindromes to calculate statistics for, and the total number of positions a
+    palindrome could have occured. These arguments are passed to calc_palindrome_stats to
+    to generate data for each possible DNA palindrome, as yielded by 
+    get_all_dna_palindromes(). 
+
+    For odd length palindromes, the data tuple will contain the palindrome with a 
+    degenerate nucleotide as follows:
+          FASTA sequence:      5' AATATT   ...   AATCATT   ...  AATAATT 3'
+          Reverse complement:  3' TTATAA   ...   AATGATT   ...  TTATTAA 5'
+    
+          yielded as:             AATATT         AATSATT        AATWATT
+     
+    """
+    palindromes = []
+    #As this function's purpose is to return the representation for all possible DNA
+    #palindromes, we store the full list of palindromes, simultaneously getting the
+    #total number of palindromes needed to calculate e-values. num_palindromes is
+    #incremented after the for loop to switch from 0-based to 1-based numbering.
+    for num_palindromes,palindrome in enumerate(get_all_dna_palindromes(max_k,min_k)):
+        palindromes.append(palindrome)
+    num_palindromes += 1
+    #Now we want to get the statistics for each palindrome, and store it in our
+    #final output list 'data'.
+    data = []
+    for palindrome in palindromes:
+        palindrome_data = calc_palindrome_stats(palindrome,counts,num_positions,
+                                                 num_palindromes)
+        data.append(palindrome_data)
+    return data
+
+def get_subpalindrome_count(palindrome,kmer_counts):
+    """Given a substring of a palindrome and a list of counts, returns the correct count for substrings of even palindromes, or of odd length palindromes containing a 'W' or 'S' degenerate nucleotide.
+
+    Inputs:
+        palindrome  - A string containing the palindrome, or substring of a palindrome,
+                      for which the count of occurences is desired.
+        kmer_counts - A Counter object containing counts of kmer occurences, that
+                      is, counts["CTA"] should be an integer specifying the number
+                      of times the 3-mer "CTA" was seen in the input data. This
+                      object must at least contain counts for kmers of the same
+                      length as 'palindrome'.
+    Output:
+        count       - An integer specifying the count of occurences of 'palindrome' in 
+                      the input data. For a substring of an even palindrome (thus no 'W'
+                      or 'S' degenerate nucleotides), say "AATT", 'count' is simply 
+                      kmer_counts["AATT"]. For a substring of an odd palindrome (hence
+                      at most one 'W' or 'S'), say "AASTT", then we have:
+                           count = kmer_counts["AACTT"] + kmer_counts["AAGTT"]
+                      If 'palindrome', or the resulting strings with 'W' or 'S' resolved
+                      have no entry in 'kmer_counts', then 'count' will be 0.
+
+    get_subpalindrome_count is a convenience function intended to replace 
+    'kmer_counts["XXXX"]' when dealing with even and odd length palindromes. This function
+    allows one to simply get the appropriate count from 'kmer_counts' given a 
+    substring of an even length palindrome, or if given a substring of an odd length 
+    palindrome containing a 'W' or 'S' degenerate nucleotide, then this function will
+    return the sum of the counts for both possiblities of the 'W' or 'S' character.
+
+    WARNING: This function is not intended for producing all possible interpretations
+    of a substring containing degenerate nucleotide symbols. It's purpose is only to 
+    simplify getting palindrome counts from kmer data, in which case substrings of odd 
+    length palindromes may contain at most one 'W' or 'S' degenerate nucleotide.
+    """
+    #resolved_palindromes will store the resolved interpretations of 'palindrome', that is
+    #both possibilities of a 'W' or 'S' character if present, or just 'palindrome' if no
+    #'W' or 'S' is present. We can then iterate over resolved_palindromes to get the 
+    #total count.
+    resolved_palindromes = []
+    count = 0
+    if 'S' in palindrome:
+        #'S' stands for 'G' or 'C', so generate both of these possbilities.
+        resolved_palindromes.append(string.replace(palindrome,'S','C'))
+        resolved_palindromes.append(string.replace(palindrome,'S','G'))
+    elif 'W' in palindrome:
+        #'W' stands for 'A' or 'T' so generate both possible interpretations.
+        resolved_palindromes.append(string.replace(palindrome,'W','A'))
+        resolved_palindromes.append(string.replace(palindrome,'W','T'))
+    else: return kmer_counts[palindrome]
+    for resolved_palindrome in resolved_palindromes:
+        count += kmer_counts[resolved_palindrome]
+    return count
+
+def palindrome_expected_value(palindrome,kmer_counts):
+    """Given a palindrome and list of kmer counts, returns the expected number of occurences of the palindrome in the input data.
+
+    Inputs:
+        palindrome     - A string containing the DNA palindrome to calculate
+                         expected value for, if odd length, then the palindrome should
+                         contain a 'W' or 'S' degenerate nucleotide symbol.
+        kmer_counts    - A Counter object containing counts of kmer occurences, that
+                         is, counts["CTA"] should be an integer specifying the number
+                         of times the 3-mer "CTA" was seen in the input data.
+ 
+                         WARNING: This Counter must contain kmer count data for kmers
+                         of length n, n-1, and n-2 where n is the length of the given
+                         palindrome. These counts are required to calculate the
+                         expected value as defined in the stochastic model discussed
+                         in the program docstring.
+    Output:
+        expected_value - A float giving the expected count of occurences of 'palindrome'
+                         in the input data. For a derivation of the formula used to
+                         calculate this, see the program docstring.
+
+    palindrome_expected_value is a small utility function that takes in a DNA palindrome
+    'palindrome' and a dictionary of kmer counts from the input data, 'kmer_counts', and 
+    then returns the expected number of occurences of 'palindrome' in the input data as
+    determined by the stochastic model of palindromes defined in the program docstring.
+    """
+    #We want the three components of the expected value, the count of the beginning
+    #k-1 mer, the count of the ending k-1 mer, and the count of the internal k-2 mer,
+    #and then use these to calculate the expected value as a float.
+    beginning_count = get_subpalindrome_count(palindrome[:-1],kmer_counts)
+    end_count = get_subpalindrome_count(palindrome[1:],kmer_counts)
+    internal_count = get_subpalindrome_count(palindrome[1:-1],kmer_counts)
+    ev = (beginning_count * end_count)/float(internal_count)
+    return ev
+
+def print_palindrome_data(palindrome_data,max_evalue=1):
+    """A convenience function for printing out palindrome representation data to stdout, one palindrome per line.
+
+    Inputs:
+        palindrome_data - A list of tuples containing palindrome representation data,
+                          one tuple per palindrome. Each tuple must be of the form:
+                 (palindrome,count,expected_count,std_dev,z_score,p_value,e_value)
+            palindrome     - A string containing the DNA palindrome for which statistics
+                             were calcuated. 
+            count          - An integer specifying the number of times the kmer 
+                             represented by 'palindrome' was observed in the input data.
+            expected_count - A float giving the expected value for the count of occurences
+                             of 'palindrome' in the input data.
+            std_dev        - A float giving the standard deviation of 'count' from
+                             its expected value, 'expected_count'.
+            z_score        - A float specifying the Z-score for the observed count of
+                             occurences of 'palindrome' in the input data. 
+            p_value        - A float giving the probability of the observed number of
+                             occurences of 'palindrome', as compared to the expected 
+                             number of occurences predicted under the stochastic model.
+            e_value        - A float specifying the expected number of tested hypotheses
+                             that would have a p-value less than or equal to 'p_value'.
+            Note that this is the same data format as is returned by get_palindromes_data
+       max_evalue       - A float specifying the maximum e-value. Only palindrome data
+                          with an e-value less than or equal to 'max_evalue' will be 
+                          printed.
+
+    print_palindrome_data is a convenience printing function for outputting palindrome 
+    representation data to stdout. Data will be outputted one palindrome per line, with
+    each line containing the following tab-delimited fields:
+           palindrome_name   observed_count   expected_count   z_score    e_value
+    Output will be sorted in ascending order by z_score, so that the most 
+    under-represented palindromes appear at the top of the list, and the most
+    over-represented ocurr at the bottom of the list.
+    """
+    #We have to unpack all the values of the tuple, despite not using std_dev or p_value,
+    #also we sort on the 5th (index 4) item of the tuple, the z-score.
+    print("#Palindrome  Observed Count  Expected Count  Z-Score  E-Value")
+    for drome,count,ev,std_dev,z_score,p_value,e_value in sorted(palindrome_data,key=itemgetter(4)):
+        if e_value > max_evalue: continue
+        print("%10s %16d %15.4f %7.4f %1.4g" % (drome, count, ev, z_score,e_value))
+    
+
+
+def main(args):
+    """Main function to direct overall program execution.
+
+    Responsible for calling all other functions, merges the kmer counts across all input
+    files in to one Counter object, then receives and prints the palindrome representation
+    data.
+    """
+    #First, parse the arguments, returning opts, the argparse Namespace object. Also 
+    #initialize tot_counts and num_positions, variables to store the kmer counts and 
+    #total possible palindrome positions across all input files.
+    opts = parse_arg()
+    tot_counts = Counter()
+    num_positions = 0
+    #Next we want to iterate over all the input files, merging the kmer counts and number
+    #of possible palindrome positions for the files at each step. Finally, we then get the
+    #representation statistics using the full dataset across all input files, and print 
+    #the results.
+    for fasta_file in opts.fastas:
+        file_counts,genome_length = get_kmer_range_counts(fasta_file,opts.min_k-2,
+                                        opts.max_k)
+        tot_counts += file_counts
+        num_positions += genome_length
+    palindrome_data = get_palindromes_data(tot_counts,num_positions,opts.min_k,opts.max_k)
+    print_palindrome_data(palindrome_data,opts.max_e)
+
+    
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

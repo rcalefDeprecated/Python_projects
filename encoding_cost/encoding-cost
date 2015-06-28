@@ -1,0 +1,469 @@
+#! /usr/bin/env python2.7
+"""This program reads a list of counts of kmers from stdin, and constructs a basic Markov model to calculate encoding costs for FASTA files. 
+
+encoding-cost 
+BME 205 Fall 2014, Programming Assignment #3 
+October 31st, 2014 
+Robert Calef 
+
+encoding-cost reads in kmer counts from stdin, and uses this data to construct a basic 
+order k-1 Markov model for sequences of arbitrary length. This model is then used to 
+calculate the encoding cost in bits of files containing FASTA data. For each file, 
+total encoding cost of the file will be outputted, along with the average encoding cost 
+per sequence and average encoding cost per character, all in bits. If more than one FASTA
+file is specified, then encoding costs calculated over the merged dataset of all the files
+will also be outputted.
+
+kmer counts must be in the format produced by the complementary program 'count_kmers', 
+that is, one whitespace-delimited (kmer,count of occurence) pair per line, for example: 
+
+   AAA	2
+   AAB	4
+   AED	86
+   ...
+
+kmer size, and thus the order of the model, will be automatically detected from the 
+input data. 
+
+Counts of kmers are used to construct the order k-1 Markov model in the following manner. 
+For k = 1, the probabilities are simply the frequencies of individual characters, as the 
+probability of each character is independent of the preceding characters. For k > 1, we 
+use conditional probabilities, which are determined by normalizing each kmer's count of 
+occurences by the total number of kmers observed with beginning with the same (k-1)-mer.
+A more detailed description of how the probabilities are estimated can be found in the
+docstrings of the make_conditional_log_probs and the make_log_frequency_table 
+functions for k > 1 and k = 1 respectively.
+
+This program also supports user-specified alphabets, start and stop characters, and 
+pseudocounts as well as the ability to calculate encoding costs for two separate files.
+For details on all the available options, see the --help message of this program, obtained
+via "encoding-cost --help".
+"""
+from __future__ import print_function
+import sys
+import argparse
+import string
+import gzip
+from math import log
+from collections import Counter
+from operator import itemgetter
+
+from fasta_fastq_parser import read_fasta
+from markov import generate_all_kmers, kmers_from_sequence, check_alphabet
+
+def gzipFile(filename):
+    """A convenience function used to open a normal or gzipped file.
+
+    This function defines a custom type for the argparse.add_argument() function,
+    which serves the same purpose as 'type=argparse.FileType('r')' except with
+    the added functionality of using the gzip module to open gzipped files for reading.
+    Gzipped files are detected by the suffix ".gz" at the end of the filename.
+    """
+    return gzip.GzipFile(filename, 'r') if filename.endswith(".gz") else open(filename,'r')
+
+
+def parse_arg():
+    """Parses command line arguments, returning appropriate values in a Namespace object.
+
+    parse_arg() takes no inputs, as the parse_args() method accesses the command line 
+    arguments directly. This function constructs an ArgumentParser object with various
+    options specified in the --help message of this program.
+
+    The only required argument is the positional 'fastas' argument specifying the files
+    from which to read sequences and calculate encoding costs. For a detailed description
+    of each option, see the --help message.
+    """
+    argparser = argparse.ArgumentParser(
+        formatter_class =  argparse.RawDescriptionHelpFormatter,
+        description = __doc__)
+    #We use type=set to automatically convert the alphabet string to a set, if no 
+    #alphabet is specified, we will add characters to the alphabet as we read counts,
+    #hence we use the empty string as a default to get an empty set, as set(None) 
+    #results in an error.
+    argparser.add_argument('-a','--alphabet',action='store', 
+        default="",type=set,
+        help=("Specifies the alphabet of valid characters in the"
+        " FASTA sequences, any other characters will be discarded. Be careful "
+        "when specifying an alphabet, as dropping characters from a sequence can "
+        "artificially introduce new kmers to the sequence. By default, "
+        "the alphabet will be detected from the list of counts read from stdin, "
+        "any character occuring in the list of counts will be added to the "
+        "alphabet. WARNING: this program does not have the functionality to "
+        "detect start and stop characters, if the counts contain a start character "
+        "other than '^' or a stop character other than '$', they must be specified "
+        "using the --start and --stop options. If an alphabet is specified, "
+        "and non-alphabet characters are detected in the input counts, then an "
+        "error will be printed and the program will exit."))
+    argparser.add_argument('--start', action = 'store',default='^',
+        help =("Specifies the character to be used to represent"
+        " the beginning of a sequence. If not specified, '^' will be used."))
+    argparser.add_argument('--stop', action = 'store',default='$',
+        help =("Specifies the character to be used to represent"
+        " the end of a sequence. If not specified, '$' will be used."))
+    argparser.add_argument('-p','--pseudocount',action='store',default=1,type=float,
+        help=("Specifies a float to be used as the pseudocount added to the counts of "
+        "all possible valid kmers, so as to prevent log(0) in any calculations. "
+        "Defaults to 1 if not specified."))
+    argparser.add_argument('fastas', action='store', default=None, nargs='+',
+        type=gzipFile,help=("A mandatory positional argument "
+        "specifying the FASTA files containing data to calculate encoding costs for."
+        " At least one file must be specified, and gzipped files are supported. If"
+        "multiple files are specified, encoding costs for each individual file will "
+        "be outputted, as well as encoding costs for the merged dataset of all files."))
+    opts = argparser.parse_args()
+    #Next we want to make sure the specified alphabet does not contain the start or stop
+    #characters, and error if so. Also print warnings if non-printable or whitespace
+    #characters are specified in the alphabet.
+    check_alphabet(opts.alphabet,opts.start,opts.stop)
+    return opts
+    
+
+def read_counts(start,stop,input_file,alphabet):
+    """Reads tab-delimited kmer,count pairs, one per line, from an input stream.
+
+    Inputs:
+        start      - The character representing the start of a sequence.
+        stop       - The character represeting the end of a sequence.
+        input_file - The input stream from which to read count data.
+        alphabet   - A set object containing the alphabet of valid characters
+                     for count data. If any non-alphabet characters are found in the 
+                     kmers, an error will be printed and the program will exit. An
+                     empty set can be used instead, in which case the alphabet will
+                     be autodetected from the input, and stored in the input set
+                     provided.
+    Outputs:
+        Returns a tuple (counts,k):
+          counts   - A Counter object containing the parsed count data, given some kmer
+                     "AAA" in the input, counts["AAA"] will be the count associated with
+                     that kmer.
+          k        - An integer giving the length of the kmers.
+
+    read_counts is a short utility function used to read in the kmer-count data used to
+    build a Markov model. Count data must be formatted as tab-delimited kmer,count pairs,
+    one pair per line, for example:
+
+        AAA	2
+        AAB	4
+        ...
+
+    although the data need not be sorted. Count data will be returned in a Counter object
+    in a tuple along with k, the length of the kmers in the parsed data.
+    """
+
+    #'counts' will store the parsed counts, and 'specified_alphabet' is used to alter
+    #non-alphabet character handling depending on whether or ot the user specified
+    #an alphabet. If no user-defined alphabet, default alphabet begins as empty set.
+    #If a user-defined alphabet, then alphabet will be non-empty, and we need to add
+    #start and stop characters to the alphabet to prevent errors when reading counts for
+    #start or stop kmers.
+    counts = Counter()
+    specified_alphabet=False
+    if len(alphabet)!= 0: 
+        specified_alphabet=True
+        alphabet.add(start)
+        alphabet.add(stop)
+    for line in input_file:
+        #First we split the line into the kmer and the count, and then check each
+        #kmer's letters for membership in the alphabet. If the letter is not in the
+        #alphabet with a user-defined alphabet, print an error and exit, else add the
+        #letter to the alphabet.
+        kmer_count=line.split()
+        kmer=kmer_count[0]
+        count=kmer_count[1]
+        for letter in kmer:
+            if letter not in alphabet:
+                if specified_alphabet:
+                    print("ERROR: Counts data contains a character not in the "
+                          "specified alphabet: %s" % (letter),
+                           file=sys.stderr)
+                    sys.exit(1)
+                else: alphabet.add(letter)
+        counts[kmer] = int(count)
+
+    #Store the length of the kmers, and get rid of the start and stop characters in
+    #the alphabet, as they get put in the alphabet when reading counts that should
+    #contain kmers with start and stop characters. We don't want start and stop
+    #characters in the alphabet, as these are not valid characters in raw sequences.
+    k = len(kmer)
+    alphabet.discard(start)
+    alphabet.discard(stop)
+    return (counts,k)
+
+
+def make_conditional_log_probs(counts):
+    """Constructs the conditional log probability table needed for an order N > 0 Markov model.
+
+    Inputs:
+        counts    - A dict-like object containing (kmers,count of occureces) as (key,value) 
+                    pairs. These counts are assumed to already contain pseudocounts, and 
+                    will be used directly to construct the probability table.
+    Outputs:
+        log_probs - A dict object containing conditional log probabilities for an order
+                    N Markov model. The order of the model is k-1, where k is the kmer 
+                    length. Given some kmer, the entry in this table will contain the
+                    probability of seeing the k-th character given the k-1 characters
+                    preceding it. E.g. log_probs["ABC"] is the base 2 logarithm of the
+                    conditional probability of seeing 'C' given that the preceding two
+                    letters were 'AB'.
+
+    make_conditional_log_probs is a simple transformation function that takes in a dict
+    of kmer-count pairs, and outputs a dict containing kmers as keys and the base 2 
+    logarithm of the conditional probability of seeig the k-th character of the kmer
+    given the k-1 characters preceding it. 
+
+    Probabilities are constructed by simply dividng each kmer's count of occurences by 
+    the sum of all kmer occurences with the same k-1 beginning characters. For example, 
+    if constructing a log-prob table for an order 2 Markov model, the conditional 
+    probability of seeing an "A" given seeing "AA" right before is represented by the 
+    3-mer "AAA". This conditional probability would be calculated by dividing the 
+    number of occurrences of "AAA" by the sum of all 3-mer occurences beginning with the
+    2-mer "AA", that is the sum of all conditional probabilities of seeing any character
+    following "AA", including the stop character, which must sum to 1.
+    """
+    #A few initialization steps:
+    #We sort our list of counts (assumed to already contain pseudocounts) so as to group
+    #kmers beginning with the same (k-1)-mer together. 
+    #'context' will be then used to store the current (k-1)-mer, or context, of the kmers 
+    #being processed. This is used to detect when we've reached the end of a context and 
+    #need to go back and normalize the appropriate kmer counts.
+    #'log_probs' will store the log probabilities to be calculated, and 'num_kmers' will
+    #be used to keep track of the number of kmers in a given context, used to backtrack
+    #over kmers in a given context.
+    kmers = sorted(counts)
+    context=None
+    log_probs = dict()
+    num_kmers=0
+    for itor,kmer in enumerate(kmers):
+
+        #Get the context of the current kmer, if it is not the same as the context
+        #seen in previous kmer, then we need to go back, normalize, and repeat.
+        #Note that context is initialized to None, so the following conditional is entered
+        #on the first iteration of this for loop
+        curr_context=kmer[0:-1]
+        if context != curr_context:
+            #When starting a new context, we need to store the new context. Then,
+            #to obtain conditional log probabilities, we go back over each kmer 
+            #in the old context and normalize its count by the total count for that 
+            #context, and then store the base 2 logarithm in the log_prob table, followed
+            #by resetting the context sum and number of kmers in preparation for the next
+            #context.
+            context=curr_context
+            for context_kmer in kmers[itor-num_kmers:itor]:
+                prob = float(counts[context_kmer])/float(context_sum)
+                log_probs[context_kmer]= -log(prob,2)
+            context_sum=0
+            num_kmers=0
+        num_kmers += 1
+        context_sum += counts[kmer]
+
+    #After exiting the preceding for loop, we still have to normalize the final context
+    #hence the duplication of code below. itor +=1 to go from 0-based to 1-based count as
+    #as ranges in Python are half-open intervals.
+    itor += 1
+    for context_kmer in kmers[itor-num_kmers:itor]:
+        prob = float(counts[context_kmer])/float(context_sum)
+        log_probs[context_kmer]= -log(prob,2)
+    return log_probs
+
+
+
+def make_log_frequency_table(counts):
+    """Constructs the character probability table used for an order 0 Markov model.
+
+    Inputs:
+        counts    - A dict-like object containing (kmers,count of occureces) as (key,value)
+                    pairs. These counts are assumed to already contain pseudocounts, and
+                    will be used directly to construct the probability table.
+    Output:
+        log_probs - A dict object containing the base 2 logarithm of individual 
+                    character probabilities for an 
+                    order 0 Markov model, or a model looking at character probability
+                    independent of any preceding characters. Each (key,value) pair in
+                    the dict is a (character, log_2(probability)) pair where the probability
+                    for a character is the count of that character's occurences divided
+                    by the total number of characters.
+
+    make_log_frequency_table transforms a dict of (character, count of occurences) 
+    key-value pair to a dict of (character, log_2(probability of occurence)) key-value 
+    pairs. The probability for each character is simply it's number of occurences over 
+    the total number of characters.
+    """
+    total_counts=0
+    #First we get the total number of characters seen by iterating over counts.
+    #counts.items() returns an iterator over the (key,value) tuples in the table.
+    for kmer_counts in counts.items():
+        total_counts += kmer_counts[1]
+    #Then we initialize the emoty log-prob table, and populate it.
+    log_probs = dict()
+    for kmer_counts in counts.items():
+        prob = float(kmer_counts[1])/float(total_counts)
+        log_probs[kmer_counts[0]] = -log(prob,2)
+    return log_probs
+
+
+def add_pseudocounts(pseudo,counts,alphabet,start,stop,k):
+    """A simple utility function to add uniform pseudocounts for all possible kmers to a Counter object.
+
+    Inputs:
+        pseudo   - The pseudocount value to be added to all possible kmers.
+        counts   - A Counter object containing (kmer,count of occurences) as (key,value) 
+                 pairs, counts in this object will be incremented directly.
+        alphabet - The alphabet of valid sequence characters, not including the start
+                   or stop characters.
+        start    - The character used to represent the beginning of a sequence.
+        stop     - The character used to represent the end of a sequence.
+        k        - The length of kmers for which pseudocounts are being generated.
+    Outputs:
+        none, simply increments the values in 'counts', and adds new entries for 
+        unobserved kmers
+    
+    add_pseudocounts is a simple function that leverages generate_all_kmers to increment 
+    counts for all possible kmers in a Counter object 'counts' by some set value 'pseudo'.
+    Entries will be added for unobserved kmers that are valid, as defined in 
+    generate_all_kmers.
+    """
+    for kmer in generate_all_kmers(k,alphabet,start,stop):
+        counts[kmer] += pseudo
+
+def get_sequence_coding_cost(sequence,alphabet,log_probs,start,stop,k):
+    """Takes in a sequences and calculates its encoding cost in bits.
+
+    Inputs:
+        sequence  - A string containing the sequence to calculate an encoding cost for.
+        alphabet  - The alphabet of valid sequence characters, not including the start
+                    or stop characters.
+        log_probs - A dict object containing (kmer,log_2(probability)) as (key,value)
+                    pairs, counts in this object will be incremented directly. If k=1,
+                    then the probability in this table is just the independent probability
+                    of a character. If k>1, then the probability is a conditional 
+                    probability of seeing the k-th character given the preceding k-1
+                    characters.
+        start     - The character used to represent the beginning of a sequence.
+        stop      - The character used to represent the end of a sequence.
+        k         - The length of kmers for which pseudocounts are being generated.
+    Output:
+        cost      - The encoding cost in bits for 'sequence' given the probabilities
+                    in 'log_probs'.
+
+    get_sequence_coding_cost uses the given table of log base 2 probabilities 'log_probs'
+    to calculate the encoding cost of the string 'sequence'. Probabilities for kmers should 
+    be independent or conditional probabilities for k=1 and k>1 respectively. 
+    Encoding costs are given in bits.
+    """
+    #Initialize 'cost', used to contain the sum of encoding costs of individual kmers
+    cost=0.0
+    #If k=1, we don't need to encode a start character, as the stop character conveys
+    #all the information needed (delimiter between sequences). If k>1, then we need
+    #start characters to indicate kmers near the beginning of the sequence. In both
+    #cases we only need one stop character, as the probability of another stop character
+    #after one stop character is always one, hence we stop encoding after seeing the first
+    #stop character. Note that (start * 0) returns an empty string.
+    sequence= (start * (k-1)) + string.upper(sequence) + stop
+    for kmer in kmers_from_sequence(sequence,k):
+        #Get each kmer from 'sequence', and add encoding cost to total.
+        cost += log_probs[kmer]
+    return cost
+
+def get_file_coding_cost(fasta_file,alphabet,log_probs,start,stop,k):
+    """Takes in an input stream containing FASTA data, and calculates its encoding cost in bits.
+
+    Inputs:
+        fasta_file  - The input stream containing the FASTA data to calculate an 
+                      encoding cost for.
+        alphabet    - The alphabet of valid sequence characters, not including the start
+                      or stop characters.
+        log_probs   - A dict object containing (kmer,log_2(probability)) as (key,value)
+                      pairs, counts in this object will be incremented directly. If k=1,
+                      then the probability in this table is just the independent 
+                      probability of a character. If k>1, then the probability is a 
+                      conditional probability of seeing the k-th character given the 
+                      preceding k-1 characters.
+        start       - The character used to represent the beginning of a sequence.
+        stop        - The character used to represent the end of a sequence.
+        k           - The length of kmers for which pseudocounts are being generated.
+    Output:
+        returna a tuple (cost,num_sequeces,tot_chars) containing three pieces of data:
+          cost          - The total encoding cost for the FASTA data in 'fasta_file' in 
+                          bits as calculated using the probabilities in log_probs.
+          tot_sequences - The number of FASTA sequences in 'fasta_file'.
+          tot_chars     - The total number of characters in all FASTA sequences in 
+                          'fasta_file'.
+
+    get_file_coding_cost uses the given table of log base 2 probabilities 'log_probs'
+    to calculate the encoding cost of the file 'fasta_file'. Probabilities given for kmers
+    should be independent or conditional probabilities for k=1 and k>1 respectively. 
+    Encoding costs are given in bits.
+    """
+    #Initialize 'cost', 'tot_chars', and 'tot_sequences' to keep track of the total encoding
+    #cost, number of characters, and number of sequences respectively
+    cost = 0.0
+    tot_chars = 0
+    tot_sequences = 0
+    #For each fasta sequences, we get its coding cost, add it to the total coding cost,
+    #and increment tot_sequences and tot_chars appropriately.
+    for fasta_seq in read_fasta(fasta_file,alphabet,filter_seqs=True,ignore_case=True):
+        seq_data = get_sequence_coding_cost(fasta_seq.sequence,alphabet,log_probs,
+                                             start,stop,k)
+        tot_chars += len(fasta_seq.sequence)
+        cost += seq_data
+        tot_sequences += 1
+    return(cost,tot_sequences,tot_chars)
+
+def print_coding_cost_data(file_name,total_cost,num_sequences,num_chars,k):
+    """A small utility function to format and print encoding cost data for a file.
+
+    Inputs:
+        file_name     - The name of the file for which encoding costs were calculated.
+        total_cost    - The total encoding cost of the file in bits.
+        num_sequences - The number of sequences in the file.
+        num_chars     - The total number of characters in all sequences in the file.
+        k             - The length of kmers for which encoding costs were calculated.
+    Output:
+        None, simply prints the provided data in a nicely formatted manner to stdout.
+    """
+    print("Order %d Markov model\nTest file: %s\n"
+          "Total encoding cost of test file: %g\nAverage bits/sequence: %g\n"
+          "Avg bits/char: %g\n"
+          % (k-1,file_name,total_cost,(total_cost/num_sequences),
+          (total_cost/num_chars)))
+
+def main(args):
+    """Main function to direct overall program execution.
+
+    Responsible for calling all other functions, fetches the appropriate type of
+    probability table for the kmer size in the given data.
+    """
+    #First parse the command line arguments, returning 'opts' the argparse Namespace obect.
+    #Using the arguments, we then read in the initial set of counts, and add pseudocounts
+    #to prevent any division by zero or logs of zero.
+    opts=parse_arg()
+    (counts,k)=read_counts(opts.start,opts.stop,sys.stdin,opts.alphabet)
+    add_pseudocounts(opts.pseudocount,counts,opts.alphabet,opts.start,opts.stop,k)
+    #Fetch the appropriate type of probability table for the given k, 'log_probs', and
+    #use it to calculate the encoding cost of the FASTA file, also getting the number of
+    #sequences and characters, used for average sequence and character coding costs
+    #respectively.
+    if k == 1:
+        #If using an order 0 Markov model, we ignore start characters.
+        counts.pop(opts.start, None)
+        log_probs = make_log_frequency_table(counts)
+    else:
+        log_probs = make_conditional_log_probs(counts)
+    total_cost = 0.0
+    total_sequences = 0
+    total_chars = 0
+    for fasta_file in opts.fastas:
+        (file_cost,num_sequences,num_chars)=get_file_coding_cost(fasta_file,opts.alphabet,
+                                                  log_probs,opts.start,opts.stop,k)
+        print_coding_cost_data(fasta_file.name,file_cost,num_sequences,num_chars,k)
+        total_cost += file_cost
+        total_sequences += num_sequences
+        total_chars += num_chars
+        fasta_file.close()
+    #If multiple files was given to calculate encoding costs for, then also want to output
+    #encoding costs for the merged dataset of all the files.
+    if len(opts.fastas) > 1:
+        print_coding_cost_data("All test files merged",total_cost,total_sequences,total_chars,k)
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

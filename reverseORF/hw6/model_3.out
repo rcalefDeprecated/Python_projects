@@ -1,0 +1,10 @@
+#Expected number of ORFs of the given length using GC model: 7.05099e-08
+#Expected number of ORFs of the given length using 3-mer model: 4.87016e-08
+#ORF Length    Number Observed     Probability    P-Value
+         0	           2	0.20000	1.00000
+         2	           1	0.10000	0.80000
+         6	           1	0.10000	0.70000
+         7	           1	0.10000	0.60000
+         9	           2	0.20000	0.50000
+        14	           2	0.20000	0.30000
+        20	           1	0.10000	0.10000

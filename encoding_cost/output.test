@@ -1,0 +1,160 @@
+Train mark_f14_1.seqs Order 0
+Order 0 Markov model
+Test file: mark_f14_2.seqs
+Total encoding cost of test file: 2.78615e+06
+Average bits/sequence: 993.99
+Avg bits/char: 4.22669
+
+Order 0 Markov model
+Test file: mark_f14_1.seqs
+Total encoding cost of test file: 2.67849e+06
+Average bits/sequence: 955.239
+Avg bits/char: 4.22836
+
+Order 0 Markov model
+Test file: All test files merged
+Total encoding cost of test file: 5.46465e+06
+Average bits/sequence: 974.611
+Avg bits/char: 4.22751
+
+
+Train mark_f14_2.seqs Order 0
+Order 0 Markov model
+Test file: mark_f14_1.seqs
+Total encoding cost of test file: 2.67855e+06
+Average bits/sequence: 955.262
+Avg bits/char: 4.22846
+
+Order 0 Markov model
+Test file: mark_f14_2.seqs
+Total encoding cost of test file: 2.78606e+06
+Average bits/sequence: 993.958
+Avg bits/char: 4.22655
+
+Order 0 Markov model
+Test file: All test files merged
+Total encoding cost of test file: 5.46462e+06
+Average bits/sequence: 974.606
+Avg bits/char: 4.22749
+
+
+Train mark_f14_1.seqs Order 1
+Order 1 Markov model
+Test file: mark_f14_2.seqs
+Total encoding cost of test file: 2.77222e+06
+Average bits/sequence: 989.018
+Avg bits/char: 4.20555
+
+Order 1 Markov model
+Test file: mark_f14_1.seqs
+Total encoding cost of test file: 2.66429e+06
+Average bits/sequence: 950.173
+Avg bits/char: 4.20593
+
+Order 1 Markov model
+Test file: All test files merged
+Total encoding cost of test file: 5.4365e+06
+Average bits/sequence: 969.592
+Avg bits/char: 4.20574
+
+
+Train mark_f14_2.seqs Order 1
+Order 1 Markov model
+Test file: mark_f14_1.seqs
+Total encoding cost of test file: 2.66495e+06
+Average bits/sequence: 950.411
+Avg bits/char: 4.20699
+
+Order 1 Markov model
+Test file: mark_f14_2.seqs
+Total encoding cost of test file: 2.77144e+06
+Average bits/sequence: 988.74
+Avg bits/char: 4.20437
+
+Order 1 Markov model
+Test file: All test files merged
+Total encoding cost of test file: 5.43639e+06
+Average bits/sequence: 969.572
+Avg bits/char: 4.20565
+
+
+Constrained Alphabet Tests
+Train mark_f14_1.seqs Order 0
+Order 0 Markov model
+Test file: mark_f14_2.seqs
+Total encoding cost of test file: 2.78526e+06
+Average bits/sequence: 993.671
+Avg bits/char: 4.22572
+
+Order 0 Markov model
+Test file: mark_f14_1.seqs
+Total encoding cost of test file: 2.67763e+06
+Average bits/sequence: 954.934
+Avg bits/char: 4.22739
+
+Order 0 Markov model
+Test file: All test files merged
+Total encoding cost of test file: 5.46289e+06
+Average bits/sequence: 974.299
+Avg bits/char: 4.22654
+
+
+Train mark_f14_2.seqs Order 0
+Order 0 Markov model
+Test file: mark_f14_1.seqs
+Total encoding cost of test file: 2.67772e+06
+Average bits/sequence: 954.964
+Avg bits/char: 4.22752
+
+Order 0 Markov model
+Test file: mark_f14_2.seqs
+Total encoding cost of test file: 2.78517e+06
+Average bits/sequence: 993.639
+Avg bits/char: 4.22558
+
+Order 0 Markov model
+Test file: All test files merged
+Total encoding cost of test file: 5.46289e+06
+Average bits/sequence: 974.298
+Avg bits/char: 4.22653
+
+
+Train mark_f14_1.seqs Order 1
+Order 1 Markov model
+Test file: mark_f14_2.seqs
+Total encoding cost of test file: 2.77154e+06
+Average bits/sequence: 988.778
+Avg bits/char: 4.20491
+
+Order 1 Markov model
+Test file: mark_f14_1.seqs
+Total encoding cost of test file: 2.66361e+06
+Average bits/sequence: 949.932
+Avg bits/char: 4.20524
+
+Order 1 Markov model
+Test file: All test files merged
+Total encoding cost of test file: 5.43515e+06
+Average bits/sequence: 969.351
+Avg bits/char: 4.20507
+
+
+Train mark_f14_2.seqs Order 1
+Order 1 Markov model
+Test file: mark_f14_1.seqs
+Total encoding cost of test file: 2.66428e+06
+Average bits/sequence: 950.173
+Avg bits/char: 4.20631
+
+Order 1 Markov model
+Test file: mark_f14_2.seqs
+Total encoding cost of test file: 2.77085e+06
+Average bits/sequence: 988.528
+Avg bits/char: 4.20385
+
+Order 1 Markov model
+Test file: All test files merged
+Total encoding cost of test file: 5.43513e+06
+Average bits/sequence: 969.347
+Avg bits/char: 4.20505
+

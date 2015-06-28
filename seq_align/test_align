@@ -1,0 +1,153 @@
+#! /usr/bin/env python2.7
+"""A program for calculating optimal global or local pairwise sequence alignments using an affine gap cost.
+
+test_align
+BME 205 Fall 2014, Programming Assignment #8
+December 3rd, 2014
+Robert Calef
+
+test_align is essentially a wrapper for the local_aligner and global_aligner classes
+defined in the align.py file. This program will take in input in FASTA format from
+stdin by default, or from a specified file, and calculate pairwise alignments of the
+first sequence in the FASTA data (the master sequence) against all other sequences in
+the FASTA file (the slave sequences). Alignments will be output to stdout in A2M format.
+
+Either local or global alignments can be performed, specified using the '--align' option.
+The alignment scoring parameters can also be adjusted via command line options. If no
+substitution matrix is provided via the '--subst_matrix' option, then the BLOSUM62
+substitution matrix will be read from the web.
+
+WARNING: Only characters in the substitution matrix will be retained in the input FASTA
+         sequences prior to alignment, all other characters will be discarded.
+
+For a more detailed description of the available input and scoring options, and their 
+default values, please see the --help message of this program.
+"""
+from __future__ import print_function
+import sys
+import argparse
+import string
+import gzip
+from urllib2 import urlopen
+
+from align import global_aligner,local_aligner
+from fasta_fastq_parser import read_fasta
+def gzip_file_or_url(filename):
+    """A convenience function used to open a normal or gzipped file, or URL, for reading, also allowing '-' to signify stdin.
+
+    This function defines a custom type for the argparse.add_argument() function,
+    which serves the same purpose as 'type=argparse.FileType('r')' except with
+    the added functionality of using the gzip module to open gzipped files for reading.
+    Gzipped files are detected by the suffix ".gz" at the end of the filename. If '-'
+    is given as the filename, then sys.stdin will be returned with the assumption that
+    sys.stdin will contain uncompressed data.
+    If the provided filename begins with "http://", then it will be treated as an URL,
+    and the input stream will be opened using urllib1.urlopen().
+
+    WARNING: This function does not support opening gZipped files over the web.
+    """
+    if filename == "-": return sys.stdin
+    elif filename.endswith(".gz"): return gzip.GzipFile(filename, 'r') 
+    elif filename.startswith("http://"): return urlopen(filename)
+    else: return open(filename,'r')
+
+def parse_arg():
+    """Parses command line arguments, returning appropriate values in a Namespace object.
+
+    parse_arg() takes no inputs, as the parse_args() method accesses the command line 
+    arguments directly. This function constructs an ArgumentParser object with various
+    options specified in the --help message of this program.
+
+    The only required argument is the '--align' argument specifying the type of alignment
+    to calculate. For a detailed description of each option, see the --help message.
+    """
+    argparser = argparse.ArgumentParser(
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description = __doc__)
+    argparser.add_argument('-s','--subst_matrix',action='store', 
+        default="http://users.soe.ucsc.edu/~karplus/bme205/f14/BLOSUM62",
+        type=gzip_file_or_url,
+        help=("Optionally specify a file or URL to read a substitution matrix in the format"
+              " used by matblas and BLAST. For a detailed description of the format, see "
+              "the docstring for the local_aligner or global_aligner class in the align.py"
+              " module. Defaults to reading the BLOSUM62 matrix from the web."))
+    argparser.add_argument('-a','--align', action = 'store', required=True, 
+        choices = ['local','global'],help =("Specifies whether global or local alignments"
+              " will be calculated. Both will be calculated with an affine gap cost."))
+    argparser.add_argument('-o','--open', action = 'store',default=12,
+        type=int,help =("An optional integer specifying the gap open penalty. "
+              "Defaults to 12.")) 
+    argparser.add_argument('-e', '--extend', action = 'store', default = 1,
+        type=int,help=("An optional integer specifying the gap extension penalty. "
+              "Defaults to 1."))
+    argparser.add_argument('-d','--double_gap', action='store', default = 3, type = int,
+        help=("An optional integer specifying the double gap penalty. Defaults to 3. "))
+    argparser.add_argument('-i','--in_file',action = 'store', default = sys.stdin,
+        type=gzip_file_or_url,help=("Optionally specify the FASTA file containing sequences"
+        " to calculate alignments for. Defaults to reading from stdin. The first sequence"
+        " will be taken as the master sequence, and all other sequences will be aligned to"
+        " this sequence."))
+    argparser.add_argument('-p','--print_score', action = 'store_true', default = False,
+        help=("If this option is specified, the A2M output will contain alignment scores "
+        "in the comment section of each slave sequence's FASTA header."))
+    opts = argparser.parse_args()
+    return opts
+    
+def get_first_sequence(fasta_reader):
+    """A utility function to read a single sequence from a FASTA file, and error out if no sequence present.
+
+    Input:
+        fasta_reader - A read_fasta generator as defined in fasta_fastq_parser.py, must be
+                       an iterable supporting the 'next' operator and yielding fasta_seq
+                       objects as defined in fasta_fastq_parser.py
+    Output:
+        fasta_seq    - A string containing a FASTA sequence as provided in 'fasta_file'.
+
+    get_first_sequence attempts to read a single FASTA sequences from 'fasta_file' 
+    printing an error and exiting via sys.exit(1) if no FASTA entries are present in 
+    'fasta_file'.
+    """
+
+    try:
+        fasta_seq = next(fasta_reader)
+    except StopIteration:
+        print("ERROR: FASTA input does not contain any sequences", file = sys.stderr)
+        sys.exit(1)
+    else:
+        return fasta_seq   
+
+
+
+def main(args):
+    """Main function to direct overall program execution.
+
+    Responsible for calling all other functions, fetches the appropriate aligner object
+    and the master sequence, then aligns all other sequences to the master sequence,
+    outputting results to sys.stdout in A2M format as they are generated.
+    """
+    #First, parse the arguments, returning opts, the argparse Namespace object.  
+    #Then check 'opts' to fetch the appropriate aligner object.
+    opts = parse_arg()
+    if opts.align == 'local':
+        aligner = local_aligner(opts.subst_matrix,opts.open,opts.extend,opts.double_gap)
+    else:
+        aligner = global_aligner(opts.subst_matrix,opts.open,opts.extend,opts.double_gap)
+    #We can then read the master sequence, and begin aligning all other sequences to it,
+    #outputting the results of each alignment one at a time. Note that we convert the
+    #master sequence to upper-case to keep with A2M format.
+    fasta_reader = read_fasta(opts.in_file,alphabet=aligner.alphabet,filter_seqs=True)
+    master_entry = get_first_sequence(fasta_reader)
+    print(">%s %s\n%s" % 
+        (master_entry.identifier,master_entry.comment,string.upper(master_entry.sequence)))
+    for fasta_seq in fasta_reader:
+        score = aligner.align(master_entry.sequence,fasta_seq.sequence)
+        a2m_seq = aligner.traceback_col_seq()
+        comment = fasta_seq.comment 
+        #If user wants alignment scores in output, tack those on to the comments prior
+        #to printing.
+        if opts.print_score: comment += (" (alignment_score = %d)" % score)
+        print(">%s %s\n%s" % (fasta_seq.identifier,comment,a2m_seq))
+    opts.in_file.close()
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

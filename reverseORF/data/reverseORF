@@ -1,0 +1,624 @@
+#! /usr/bin/env python
+"""A program for calculating the probability of ORFs of various lengths on the opposite strand of a known gene under four different stochastic models.
+
+reverseORF
+BME 205 Fall 2014, Programming Assignment #5
+November 21st, 2014
+Robert Calef
+
+reverseORF is intended for estimating the probability of observing ORFs of various 
+lengths on the opposite strand of a known gene under four separate stochastid models.
+In brief, these four models are:
+   1. GC Model: The DNA is undergoing selection only for GC content, the only parameter
+                for this model is the GC content of the genome in question.
+   2. 3-mer Model: The DNA is undergoing selection on 3-mers, but not specific to
+                   protein-coding regions. For this model, the parameters are 3-mer
+                   counts across the whole genome.
+   3. Codon Model: The DNA is on the opposite strand of some protein-coding region of
+                   a specified length in the organism in question. The parameters for
+                   this model are codon counts from protein-coding regions of the genome
+                   in question, and are used to generate synthetic open reading frames
+                   to estimate ORF length probabilities.
+   4. ORF Model:   The DNA is on the opposite strand of a specific protein-coding region
+                   provided as input to the program. Synthetic ORFs that encode this 
+                   protein sequence will be generated to estimate the probabilities
+                   of various ORF lengths on the opposite strand of the protein-coding
+                   region.
+For more information on each of the models, see the docstrings for the functions
+gc_model, triplet_model, codon_model, and orf_model respectively.
+
+This program was written with an experiment involving a 388 codon long ORF on the 
+opposite strand of the thermosome subunit alpha protein in the hyperthermophile
+Sulfolobus shibatae. As such, if no input options are provided, reverseORF will
+default to reading a codon table for S. shibatae from the web, and assuming an ORF
+length in question of 388. A protein sequence in FASTA format must be provided. 
+
+By default, output will consist of two histogram files, 'model_3.out' containing data
+for the codon model, and 'model_r.out', containing data for the ORF model. Each of these
+files will contain data in the following format:
+
+ -A header line starting with the '#' character giving the title of each field.
+ -One entry per line, with each entry corresponding to a single observed ORF length and
+  containing the following tab-delimited fields:
+                   length       number  prob    p_value
+
+                     length - An integer giving the ORF length in question.
+                     number - An integer specifying the number of times an ORF 
+                              of length 'length' was observed.
+                     prob   - A float giving a maximum likelihood estimate of 
+                              the probability of observing an ORF of length 
+                              'length'.
+                     p_value - A float giving the probability of observing an ORF 
+                               of length 'length' or greater.
+
+Genome sequence in FASTA format can be provided via the --genome option, resulting in
+e-values for the given ORF length being calculated under the GC model and the 3-mer model.
+These e-values will be printed in a header line starting with the '#' character at the 
+beginning of the two output files.
+
+For a more detailed description of the available input options and their default values,
+please see the --help message of this program.
+"""
+from __future__ import print_function
+import sys
+import argparse
+import string
+import gzip
+from collections import Counter
+from random import seed
+
+from codons import codon_generator,count_kmers,reverse_complement
+from fasta_fastq_parser import read_fasta
+def gzipFile(filename):
+    """A convenience function used to open a normal or gzipped file, also allowing '-' to signify stdin.
+
+    This function defines a custom type for the argparse.add_argument() function,
+    which serves the same purpose as 'type=argparse.FileType('r')' except with
+    the added functionality of using the gzip module to open gzipped files for reading.
+    Gzipped files are detected by the suffix ".gz" at the end of the filename. If '-'
+    is given as the filename, then sys.stdin will be returned with the assumption that
+    sys.stdin will contain uncompressed data.
+    """
+    if filename == "-": return sys.stdin
+    else: return gzip.GzipFile(filename, 'r') if filename.endswith(".gz") else open(filename,'r')
+
+def parse_arg():
+    """Parses command line arguments, returning appropriate values in a Namespace object.
+
+    parse_arg() takes no inputs, as the parse_args() method accesses the command line 
+    arguments directly. This function constructs an ArgumentParser object with various
+    options specified in the --help message of this program.
+
+    The only required argument is the '--num argument' specifying the number of synthetic
+    sequences to generate for estimation of probabilities. For a detailed description
+    of each option, see the --help message.
+    """
+    argparser = argparse.ArgumentParser(
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description = __doc__)
+    argparser.add_argument('-p','--protein',action='store', 
+        default=sys.stdin,type=gzipFile,
+        help=("An optional FASTA file containing a protein sequence for the forward "
+              "strand. If a sequence is provided, data for the protein model will be "
+              " generated and used to estimate probabilities of ORF lengths under that "
+              "model. Can be a gZip'ed file. If no file is specified, uncompressed output"
+              " will be read from stdin."))
+    argparser.add_argument('-c','--codon', action = 'store', default = None,
+        type=gzipFile,help =("An optional file storing the codon usage table for the "
+              "organism in question. If not provided, a codon usage table for the archaeon"
+              "Sulfobolus solfataricus will be downloaded from the web. A detailed "
+              "description of the codon usage table format can be found in the docstring "
+              "of the codon_generator class defined in the codons.py module."))
+    argparser.add_argument('-n','--num_sequences', action = 'store',default=10000,
+        type=int,help =("An optional integer specifying the number of synthetic sequences " 
+              "to generate as data to estimate probabilities under the codon model. Will "
+              "also be used as the number of synthetic sequences to generate for the "
+              "protein model if a protein sequece is specified via the --protein option."
+              "Defaults to 10,000 sequences."))
+    argparser.add_argument('-g', '--genome', action = 'store', default = None,
+        type=gzipFile,help=("Optionally specifies a FASTA file containing the genome of "
+              "the organism in question. The genome will be used to obtain 1-mer and"
+              "3-mer counts to calculate the expected number of 'orf_length' length ORFs "
+              "under the GC and 3-mer models."))
+    argparser.add_argument('-o','--orf_length', action='store', default = 388, type = int,
+        help=("An integer specifying the ORF length to calculate e-values for under the "
+              "GC and 3-mer models. If not specified, 388 will be used, the original ORF"
+              " legth in question."))
+    argparser.add_argument('-m3','--model3', action = 'store', default = "model_3.out",
+        type=argparse.FileType('w'),help=("Optionally specify the name for the output"
+              " file containing the histogram data for the codon model. Defaults to "
+              "creating a file called 'model_3.out'."))
+    argparser.add_argument('-m4','--model4', action = 'store', default = "model_4.out",
+        type=argparse.FileType('w'),help=("Optionally specify the name for the output"
+              " file containing the histogram data for the ORF model. Defaults to "
+              "creating a file called 'model_4.out'."))
+    argparser.add_argument('-d','--debug', action = 'store_true',default=False,
+        help=("Specifies that the program should be run in debug mode, seeding the "
+              "random number generator with 1 to produce consistent results."))
+    opts = argparser.parse_args()
+    return opts
+    
+def get_longest_orf_one_strand(sequence,starts=("AUG"),stops=("UGA","UAG","UAA")):
+    """Finds and returns the longest open reading frame (ORF) in the provided RNA sequence.
+
+    Inputs:
+        sequence    - A string containing the RNA sequence to find the longest ORF in. A 
+                      DNA sequence can be provided and all T's will be converted to U's.
+        starts      - An optional iterable supporting the "in" operator containing valid 
+                      start codons as strings. Defaults to ("AUG") as the only start codon.
+        stops       - An optional iterable supporting the "in" operator containing valid stop
+                      codons as strings. Defaults to ("UGA","UAG","UAA") as the possible
+                      stop codons.
+        WARNING: As this function is intended for RNA sequences, start and stop codons
+        must be provided using the alphabet ACGU instead of ACGT. Start and stop codons
+        must be specified using uppercase letters, as 'sequence' will be converted to 
+        uppercase.
+    Output:
+        longest_orf - A string containing the longest ORF found in the RNA sequence 
+                      'sequence', this string will not contain the stop codon.
+    
+    get_longest_orf_one_strand is used to find the longest open reading frame in the 
+    RNA sequence 'sequence', the reverse complement of 'sequence' will not be checked.
+    An open reading frame is defined as a start codon, followed by any number of codons
+    and terminated by a stop codon. The ORF returned by this will be the longest ORF in
+    any of the three reading frames present in 'sequence'. The returned ORF will not 
+    contain the stop codon, as we also allow for ORFs that run off the edge of the sequence
+    (not terminated by a stop codon).
+    """
+    #To prepare for finding the ORF, want to convert the sequence to all upper case RNA 
+    #characters.
+    length = len(sequence)
+    longest_orf=""
+    sequence = string.upper(sequence)
+    if "T" in sequence:
+        sequence = string.replace(sequence,"T","U")
+    #Next iterate over each reading frame, finding the longest ORF in each one, and 
+    #returning the longest of the three. 'in_orf' used to indicate that we're currently
+    #reading an ORF, and 'orf' used to store the current ORF being read.
+    for offset in xrange(3):
+        in_orf = False
+        orf = ""
+        for start in xrange(offset,length,3):
+            if start + 2 >= length: break
+            codon = sequence[start:start+3]
+            if not in_orf:
+                #If we find a start codon while not in an ORF, indicate that we're now 
+                #reading an ORF.
+                if codon in starts: in_orf = True
+            if in_orf:
+                if codon in stops:
+                    #If we reach a stop while reading an orf, store the orf if longer than
+                    #current longest, and reset 'in_orf' and 'orf'.
+                    if len(orf) > len(longest_orf):
+                        longest_orf = orf
+                    orf = ""
+                    in_orf = False
+                    continue
+                orf += codon
+        #Check if any ORF being read when we run off the sequence is longer than the 
+        #current longest ORF.
+        if len(orf) > len(longest_orf):
+            longest_orf = orf
+    return longest_orf
+
+def generate_orfs_from_protein_seq(codon_gen,num_orfs,protein_seq):
+    """Takes in a codon_gen object and protein sequence, and generates random ORFs coding for the same protein.
+
+    Inputs:
+        codon_gen   - A codon_generator object initialized with a codon usage table for the
+                      appropriate organism.
+        num_orfs    - An integer specifying the number of synthetic ORFs to generate.
+        protein_seq - A string containing a protein sequence in single letter amino acid 
+                      code. Synthetic ORFs generated will encode this protein sequence.
+    Output:
+        orf         - A string containing a random synthetic ORF encoding 'protein_seq' 
+                      generated according to the probabilities in 'codon_gen'. The ORF is
+                      an RNA sequence, using the alphabet ACGU instead of ACGT. The yielded
+                      ORF will end with a stop codon.
+
+    This function is a generator used to yield random ORFs encoding a specified protein 
+    sequence, one at a time. The codons encoding each amino acid and their respective 
+    probabilities are determined from the codon usage table used to intialize the 
+    codon_generator object, 'codon_gen', required as an input argument. 
+    """
+    #If the provided protein sequence doesn't have a stop character, add one so the
+    #yielded ORFs will contain a stop codon.
+    if '*' not in protein_seq:
+        protein_seq += '*'
+    for orf_num in xrange(num_orfs):
+        orf = ""
+        #For each residue in the protein sequence, apped a randon codon for that residue
+        #to the current ORF.
+        for residue in protein_seq:
+            orf += codon_gen.get_random_aa_codon(residue)
+        yield orf
+
+def generate_orfs_from_length(codon_gen,num_orfs,length):
+    """Takes in a codon_gen object and yields random ORFs of the given length
+
+    Inputs:
+        codon_gen - A codon_generator object initialized with a codon usage table for the
+                    appropriate organism.
+        num_orfs  - An integer specifying the number of synthetic ORFs to generate.
+        length    - An integer specifying the length of synthetic ORFs to generate, 
+                    including the stop codon.
+
+    Output:
+        orf       - A string containing a random synthetic ORF of length 'length'
+                    generated according to the probabilities in 'codon_gen'. The ORF is
+                    an RNA sequence, using the alphabet ACGU instead of ACGT. The yielded
+                    ORF will begin and end with the start codon "AUG" and a stop codon
+                    respectively.
+
+    This function is a generator used to yield random ORFs of a specific length, one at a
+    time. The probabilities of codons are determined from the codon usage table used to 
+    intialize the codon_generator object, 'codon_gen', required as an input argument.
+    """
+    for orf_num in xrange(num_orfs):
+        #We force each ORF to start with the start codon "AUG", as well as 
+        orf="AUG"
+        for codon_num in xrange(length-2): 
+            orf += codon_gen.get_random_codon(not_allowed="*")
+        #Similarly, we force the ORF to end with a random stop codon.
+        orf += codon_gen.get_random_aa_codon("*")
+        yield orf
+
+def read_single_protein_sequence(fasta_file):
+    """A utility function to check if a FASTA file contains one sequence, and return that sequence.
+
+    Input:
+        fasta_file - An input stream containing protein sequence data in FASTA format.
+    Output:
+        protein_seq - A string containing a protein sequence as provided in 'fasta_file'.
+ 
+    read_single_protein_sequence reads FASTA sequences from 'fasta_file' printing an error
+    and exiting via sys.exit(1) if more than one sequence is present in 'fasta_file'. If 
+    only a single sequence is present, then it is returned as 'protein_seq'.
+    """
+    protein_seq=""
+    for num_seqs,fasta_seq in enumerate(read_fasta(fasta_file)):
+        protein_seq = fasta_seq.sequence
+    
+    if 'num_seqs' not in locals() or num_seqs != 0:
+        #If no sequences in fasta_file, 'num_seqs' will be undefined. If a sequence is 
+        #present, 'num_seqs' is 0-based, hence we check 'num_seqs !=0', and print 
+        #'num_seqs + 1' if printing an error.
+        print("ERROR: Protein sequence file should only contain one sequence "
+              "corresponding to the protein sequence for the forward strand.\n"
+              "Filename: %s Number of sequences: %d" % (fasta_file,num_seqs+1),
+              file=sys.stderr)
+        sys.exit(1)
+    return protein_seq
+
+def get_genome_probabilities(genome_input):
+    """Uses DNA sequences in FASTA format to return number of bases, nucleotide probabilities, and 3-mer probabilities.
+
+    Input:
+        genome_input  - An input stream containing DNA sequence data in FASTA format.
+    Output:
+      Returns a tuple containing three pieces of data:
+        (num_bases, base_probs, triplet_probs)
+        num_bases     - An integer giving the total number of bases across all sequences in
+                        'genome_input'.
+        base_probs    - A Counter object containing nucleotide probabilities, 
+                        base_probs["G"] is the probability of the 1-mer "G" given the 
+                        data in 'genome_input'.
+        triplet_probs - A Counter object containing 3-mer probabilities, 
+                        triplet_probs["AAA"] is the probability of the 3-mer "AAA" given
+                        the sequence data in 'genome_input'.
+
+    get_genome_probabilities uses 1-mer and 3-mer counts from the DNA sequences in 
+    'genome_inputs' to obtain maximum likelihood estimates of 1-mer and 3-mer probabilities
+    in the given genome. The 1-mer and 3-mer probabilities are returned in Counter objects
+    along with the total number of nucleotides in the input sequence data.
+    """
+    #Initialize the objects used to accumulate 1-mer, 3-mer, and total base counts
+    #across all sequences in 'genome_input'.
+    base_probs = Counter()
+    triplet_probs = Counter()
+    num_bases = 0.0
+    for num_seqs,seq in enumerate(read_fasta(genome_input)):
+        #For each sequence we add two times its length to the total number of bases
+        #to account for the forward and reverse strand. We also add 1-mer and 3-mer
+        #counts from both strands.
+        num_bases += 2 * len(seq.sequence)
+        opposite_strand = reverse_complement(seq.sequence)
+        base_probs += count_kmers(seq.sequence,1)
+        triplet_probs += count_kmers(seq.sequence,3)
+        base_probs += count_kmers(opposite_strand,1)
+        triplet_probs += count_kmers(opposite_strand,3)
+    #After we read in all the raw counts, normalize them to probabilities.
+    for key in base_probs:
+        base_probs[key] /= num_bases
+    num_triplets = num_bases - 4*(num_seqs+1)
+    for key in triplet_probs:
+        triplet_probs[key] /= num_triplets
+    return (num_bases,base_probs,triplet_probs)
+
+def gc_model(gc_content,orf_length):
+    """Calculates the probability of an ORF of a given length using GC content.
+
+    Inputs:
+        gc_content - A float giving the GC content of the genome in question as a number
+                     from 0 to 1.0
+        orf_length - An integer specifying the length of an ORF to calculate a 
+                     probability for.
+    Output:
+        orf_prob   - A float specifying the probability of observing an ORF of length
+                     'orf_length' under the stochastic model described below.
+
+    This function calculates the probability of observing an ORF of length 'orf_length'
+    under a stochastic model that considers only nucleotide frequency. As nucleotides
+    occur in basepairs, this model has only one parameter, the GC content of the genome.
+    This function assumes an ORF starting with the start codon "ATG" and ending with one
+    of the three stop codons "TGA", "TAG", or "TAA".
+    """
+    #First calculate 'gc_prob' and 'at_prob' the probabilities of G/C and A/T respectively.
+    at_content = 1.0 - gc_content
+    gc_prob = gc_content/2.0
+    at_prob = at_content/2.0
+    #Next calculate probabilities or the start and stop codons, and use this to get the
+    #probability of an ORF of the given length
+    p_TAG = p_TGA = p_ATG = (at_prob ** 2) * gc_prob
+    p_TAA = at_prob ** 3
+    p_stop = p_TGA + p_TAG + p_TAA
+    orf_prob = p_ATG * ((1-p_stop) ** (orf_length - 1))
+    return orf_prob
+
+def triplet_model(triplet_probs,orf_length):
+    """Calculates the probability of an ORF of a given length using 3-mer probabilities.
+
+    Inputs:
+        triplet_probs - A Counter object containing 3-mer probabilities,
+                        triplet_probs["AAA"] is the probability of the 3-mer "AAA" in
+                        the genome in question.
+        orf_length    - An integer specifying the length of an ORF to calculate a
+                        probability for.
+    
+    Output:
+        orf_prob   - A float specifying the probability of observing an ORF of length
+                     'orf_length' under the stochastic model described below.
+
+    This function calculates the probability of observing an ORF of length 'orf_length'
+    under a stochastic model that considers only 3-mer frequencies across the whole genome
+    in question. This function assumes an ORF starting with the start codon "ATG" and 
+    ending with one of the three stop codons "TGA", "TAG", or "TAA".
+    """
+    #We get start and stop probabilities from the provided 3-mer probability table,
+    #then calculate the probability of an ORF of the given length.
+    p_start = triplet_probs["ATG"]
+    p_stop = triplet_probs["TGA"] + triplet_probs["TAG"] + triplet_probs["TAA"]
+    orf_prob = p_start * ((1-p_stop) ** (orf_length - 1))
+    return orf_prob
+
+
+def codon_model(codon_gen,num_seqs,protein_length):
+    """Generates synthetic ORFs of a given length using codon probabilities, returning a Counter object of reverse-strand longest ORF lengths.
+
+    Inputs:
+        codon_gen   - A codon_generator object initialized with a codon usage table for the
+                      appropriate organism.
+        num_seqs    - An integer specifying the number of synthetic ORFs to generate for 
+                      probability estimation.
+        length      - An integer specifying the length of synthetic ORFs to generate,
+                      including the stop codon.
+    Output:
+        length_hist - A Counter object containing counts of ORFs observed of a certain 
+                      length on the opposite strand of a generated ORF. length_hist[120]
+                      will be the number of times a generated ORF had a 120 codon long ORF
+                      as the longest ORF on its opposite strand.
+
+    codon_model uses codon probabilities specified by 'codon_gen' to produce synthetic 
+    ORFs. For each synthetic ORF generated, the length of the longest ORF on the reverse 
+    strand will be found, and the corresponding element of 'length_hist' will be 
+    incremented. The data in 'length_hist' is intended for estimating the probability of
+    seeing an ORF of some length on the opposite strand of a coding sequence with 
+    'protein_length' codons.
+    """
+    #First initialize the Counter used to keep track of reverse strand longest ORF lengths
+    length_hist = Counter()
+    for synthetic_orf in generate_orfs_from_length(codon_gen,num_seqs,protein_length):
+        #For each generated sequence, reverse complement, find the longest ORF, and 
+        #increment the appropriate count, using len(longest_orf)/3 to go from length
+        #in nucleotides to length in codons.
+        opposite_strand_seq = reverse_complement(synthetic_orf)
+        longest_orf = get_longest_orf_one_strand(opposite_strand_seq)
+        length_hist[len(longest_orf)/3] += 1
+    return length_hist
+
+def orf_model(codon_gen,num_seqs,protein_seq):
+    """Generates synthetic ORFs encoding the given protein using codon bias probabilities, returning a Counter object of reverse-strand longest ORF lengths.
+
+    Inputs:
+        codon_gen   - A codon_generator object initialized with a codon usage table for the
+                      appropriate organism.
+        num_seqs    - An integer specifying the number of synthetic ORFs to generate for
+                      probability estimation.
+        protein_seq - A string containing a protein sequence in single letter amino acid
+                      code. Synthetic ORFs generated will encode this protein sequence.
+    Output:
+        length_hist - A Counter object containing counts of ORFs observed of a certain
+                      length on the opposite strand of a generated ORF. length_hist[120]
+                      will be the number of times a generated ORF had a 120 codon long ORF
+                      as the longest ORF on its opposite strand.
+
+    codon_model uses codon probabilities specified by 'codon_gen' to produce synthetic
+    ORFs. For each synthetic ORF generated, the length of the longest ORF on the reverse
+    strand will be found, and the corresponding element of 'length_hist' will be
+    incremented. The data in 'length_hist' is intended for estimating the probability of
+    seeing an ORF of some length on the opposite strand of a sequence encoding 
+    'protein_seq'.
+    """
+    #First initialize the Counter used to keep track of reverse strand longest ORF lengths
+    length_hist = Counter()
+    for synthetic_orf in generate_orfs_from_protein_seq(codon_gen,num_seqs,protein_seq):
+        #For each generated sequence, reverse complement, find the longest ORF, and
+        #increment the appropriate count, using len(longest_orf)/3 to go from length
+        #in nucleotides to length in codons.
+        opposite_strand_seq = reverse_complement(synthetic_orf)
+        longest_orf = get_longest_orf_one_strand(opposite_strand_seq)
+        length_hist[len(longest_orf)/3] += 1
+    return length_hist
+
+
+def get_gc_and_triplet_evalues(genome_input,orf_length):
+    """Takes in genome sequence in FASTA format and returns the expected number of ORFs of a given length under nucleotide and triplet models.
+
+    Inputs:
+        genome_input - An input stream containing genomic DNA sequence in FASTA format.
+        orf_length   - An integer specifying the length of ORF to calculate an e-value for
+                       under the nucleotide and triplet models.
+    Output
+        Returns a tuple containing two pieces of data
+          (gc_orf_expected,triplet_orf_expected)
+        gc_orf_expected      - A float giving the expected number of ORFs of length 
+                               'orf_length' in 'genome_input' considering only nucleotide 
+                               frequency.
+        triplet_orf_expected - A float giving the expected number of ORFs of length 
+                               'orf_length in 'genome_input' considering only 3-mer 
+                               frequency.
+
+    This function obtains 1-mer and 3-mer probabilities from the sequences in 
+    'genome_input', and uses these values to calculate the expected number of ORFS
+    of length 'orf_length' observed in the given genome under two stochastic models. 
+    The first model considers only nucleotide frequencies in the genome, while the second
+    model uses 3-mer frequencies to calculate the ORF e-value.
+    """
+    #First get our 1-mer and 3-mer probabilities, combining "G" and "C" probabilities to
+    #get the GC content used for the GC model.
+    genome_length,base_probs,triplet_probs = get_genome_probabilities(genome_input)
+    gc_content = base_probs["G"] + base_probs["C"]
+    gc_orf_prob = gc_model(gc_content,orf_length)
+    #Next we calculate the number of positions in the genome that an ORF of the given 
+    #length can occur, subtracting 2 *(orf_length-1) to account for both DNA strands.
+    possible_windows = genome_length - 2* (orf_length-1)
+    gc_orf_expected = gc_orf_prob * possible_windows
+    triplet_orf_prob = triplet_model(triplet_probs,orf_length)
+    triplet_orf_expected = triplet_orf_prob * possible_windows
+    return (gc_orf_expected,triplet_orf_expected)
+
+def hist_to_probabilities(hist,total):
+    """Takes in a histogram, and converts counts to probabilities.
+ 
+    Inputs:
+        length_hist  - A Counter object containing counts of ORFs observed of a certain
+                       length. length_hist[120] should be the number of times an ORF 120 
+                       codons long was observed.
+        total        - An integer specifying the total number of ORFs observed, can be
+                       obtained as sum(length_hist[key] for key in length_hist). If 
+                       total is zero, an empty list will be returned.
+    Output:
+        length_probs - A list of tuples, one tuple per observed length, containing the 
+                       following four pieces of data:
+                         (length, number, probability, p_value)
+                       length - An integer giving the ORF length in question.
+                       number - An integer specifying the number of times an ORF of length
+                                'length' was observed.
+                       prob   - A float giving a maximum likelihood estimate of the
+                                probability of observing an ORF of length 'length'.
+                       p_value - A float giving the probability of observing an ORF of
+                                 length 'length' or greater.
+
+    hist_to_probabilities is a convenience function that serves to convert a histogram of
+    counts stored in a Counter object to a list of tuples containing maximum likelihood
+    estimation of probabilities of the elements of the histogram.
+    """
+    #First print a warning and return empty list if 'total' is zero to prevent division
+    #by zero
+    if total == 0: 
+        print("WARNING: Histogram total given to hist_to_probabilities() is zero, "
+              "returning an empty list.", file = sys.stderr)
+        return []
+    #Initialize length_probs list and p_value for keeping track of p-value at each step
+    #also convert total to float to prevent integer division.
+    length_probs = []
+    p_value = 1.0
+    total = float(total)
+    for length, num_occurences in hist.iteritems():
+        prob = num_occurences/total
+        length_probs.append((length,num_occurences,prob,p_value))
+        p_value -= prob
+    return length_probs
+
+
+def print_data(probs,output,gc_orf_evalue=None,triplet_orf_evalue=None):
+    """A convenience function for printing data in formatted output.
+
+    Inputs:
+        probs              - A list of tuples, one tuple per observed length, containing
+                             the following four pieces of data:
+                               (length, number, probability, p_value)
+                             length - An integer giving the ORF length in question.
+                             number - An integer specifying the number of times an ORF 
+                                      of length 'length' was observed.
+                             prob   - A float giving a maximum likelihood estimate of 
+                                      the probability of observing an ORF of length 
+                                      'length'.
+                             p_value - A float giving the probability of observing an ORF 
+                                       of length 'length' or greater.
+        output             - An output stream to print the data to.
+        gc_orf_evalue      - Optionally provide a float giving the expected number of ORFs
+                             of the given length under the GC model.
+        triplet_orf_evalue - Optionally provide a float giving the expected number of ORFs
+                             of the given length under the 3-mer model.
+    Output: 
+        None, only prints the data provided in 'probs', 'gc_orf_evalue', and 
+        'triplet_orf_evalue' to the output stream specified in 'output'.
+
+    This function prints the provided data to the output stream 'output' in the following
+    format:
+        -If e-values for the GC model and/or the 3-mer models are provided, they will be
+         printed in a line beginning with a '#' character to allow the bulk of the data
+         to still be used with a graphing program such as gnuplot.
+
+        -All the data contained in 'probs' will be printed, one tuple per line, with each
+         tuple printed as a tab-delimited list of it's elements:
+                   length	number	prob	p_value
+    """
+    if gc_orf_evalue is not None:
+        print("#Expected number of ORFs of the given length using GC model: %g"
+              % (gc_orf_evalue), file = output)
+    if triplet_orf_evalue is not None:
+        print("#Expected number of ORFs of the given length using 3-mer model: %g"
+              % (triplet_orf_evalue), file = output)
+    print("#ORF Length    Number Observed     Probability    P-Value", file=output)
+    for length, num_occurences,prob,p_value in probs:
+        print("%10d\t%12d\t%1.5f\t%1.5f" % (length, num_occurences,prob,p_value),
+            file=output)
+       
+
+
+
+def main(args):
+    """Main function to direct overall program execution.
+
+    Responsible for calling all other functions, fetches the codon_generator object, as 
+    well as reading gathering data for the up to four tested models. The gathered data is
+    then passed to the appropriate formatting and printing functions to produce the final
+    output.
+    """
+    #First, parse the arguments, returning opts, the argparse Namespace object. Also 
+    #read the protein sequence for the forward strand.
+    opts = parse_arg()
+    if opts.debug: seed(1)
+    codon_gen = codon_generator(opts.codon)
+    protein_seq = read_single_protein_sequence(opts.protein)
+    protein_length = len(protein_seq)
+    if opts.genome is not None:
+        #If a genome file is provided, get data for the GC and 3-mer models.
+        gc_orf_evalue,triplet_orf_evalue = get_gc_and_triplet_evalues(opts.genome,
+           388)
+    else:
+        #If no genome provided, set e-values to None to signify no data was provided
+        gc_orf_evalue = triplet_orf_evalue = None
+    codon_hist = codon_model(codon_gen,opts.num_sequences,protein_length)
+    codon_model_probs = hist_to_probabilities(codon_hist,opts.num_sequences)
+    print_data(codon_model_probs,opts.model3,gc_orf_evalue,triplet_orf_evalue)
+    orf_hist = orf_model(codon_gen,opts.num_sequences,protein_seq)
+    orf_model_probs = hist_to_probabilities(orf_hist,opts.num_sequences)
+    print_data(orf_model_probs,opts.model4,gc_orf_evalue,triplet_orf_evalue)
+    opts.model3.close()
+    opts.model4.close()
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

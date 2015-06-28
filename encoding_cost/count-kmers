@@ -1,0 +1,172 @@
+#! /usr/bin/env python2.7
+"""This program takes in FASTA data from stdin, and outputs a list of kmers and counts of occurences to stdout.
+
+count-kmers
+BME 205 Fall 2014, Programming Assignment #3
+October 31st, 2014
+Robert Calef
+
+A basic kmer counting program that simply breaks FASTA sequences in to kmers of a specified
+length, counts the occurences of each kmer, and outputs a list of kmers and counts to 
+stdout. This program is intended to be used for gathering data to build a Markov model
+of sequences, and as such, it uses a start character, '^', and stop character '$', to
+represent the beginning and end of a sequence respectively. 
+
+count-kmers supports a user-defined alphabet for the sequence data being read in. Any
+characters in the sequence that are not in the alphabet will be discarded from the 
+sequence. WARNING: Discarding characters from the sequence can result in artificially
+introducing kmers in the sequence. All sequences will be converted to upper case
+before checking for membership in the alphabet. The default alphabet is all
+ASCII uppercase letters. Errors will be printed if non-printable or whitespace characters
+are included in the alphabet, or if the start or stop characters are in the specified 
+alphabet.
+
+The FASTA file will be read one sequence at a time, adding the counts of kmers
+from that sequence to an overall list of counts for the entire file. Output will consist 
+of one kmer-count pair per line, with the kmer and its count of occurences in the file 
+separated by a tab, and can be sorted in various orders using command-line arguments. 
+NOTE: The output contains no zero counts, that is, only kmers that were seen in the input
+file will be present in the output (all counts will be one or greater):
+
+    Example output: Alphabet = "ABCD", order = 2, sequence="AAAAABAABAAD"
+
+       AAA    3
+       AAB    2
+       AAD    1
+       ABA    2
+       AD$    1
+       BAA    2
+       D$$    1
+       ^AA    1
+       ^^A    1
+       
+    Note how the example output contains no entry for the 3-mer AAC, which would
+    have a count of zero. Also note that thenumber of kmers containing start
+    characters is the same as the number of kmers containing stop characters
+    allowing this data to be used for a 'reverse' Markov model as well.
+
+For a detailed description of all available options, check the help message of this 
+program, which can be printed via "count-kmers --help".
+"""
+from __future__ import print_function
+import sys
+import argparse
+import sys
+import string
+from collections import Counter
+from operator import itemgetter
+
+from fasta_fastq_parser import read_fasta
+from markov import count_kmers, check_alphabet
+
+
+def parse_arg():
+    """Parses command line arguments, returning appropriate values in a Namespace object.
+    
+    parse_arg() takes no inputs, the parse_args() method accesses the command line
+    arguments directly. This function constructs an ArgumentParser object with various
+    possible options specified in the --help message of this program.
+    
+    Specifying an order of the Markov model for which counts are being generated is
+    required, and is specified using the '-o' or '--order' option. All other command
+    line arguments are optional, as input is read from stdin.
+    """
+    argparser = argparse.ArgumentParser(
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description = __doc__)
+    argparser.add_argument('-o','--order', action = 'store',required=True,
+        type=int,help =("Specifies order of the model, or k-1."))
+    argparser.add_argument('-a','--alphabet',action='store', 
+        default=string.ascii_uppercase,
+        help=("Specifies the alphabet of valid characters in the"
+        " FASTA sequences, any other characters in the sequence will "
+        "be ignored. Note that all letters in the sequence will be "
+        "converted to uppercase before checking for membership in "
+        "the alphabet. If not specified, a default alphabet of all"
+        "uppercase letters will be used. WARNING Be careful when "
+        "specifying an alphabet, as discarding characters from a "
+        "sequence can create artificial kmers. E.G. Say we had a "
+        "sequence 'ABCDE' and an alphabet of 'ABDE', and wanted to "
+        "count all possible 3-mers, then we would be artificially "
+        "introducing the 3-mer 'BDE', amongst others, that was not "
+        "present in the original sequence."))
+    argparser.add_argument('--start', action = 'store',default='^',
+        help =("Specifies the character to be used to represent"
+        " the beginning of a sequence."))
+    argparser.add_argument('--stop', action = 'store',default='$',
+        help =("Specifies the character to be used to represent"
+        " the end of a sequence."))
+    argparser.add_argument('-c','--sort-by-count',action='store_true',
+        dest='count_sort',help=("Output k-mer/count pairs "
+        "sorted by count in ascending order, or in descending "
+        "order by count if specified along with '--reverse'. "
+        "By default output is sorted in ascending lexicographic "
+        "order."))
+    argparser.add_argument('-r','--reverse',action='store_true',
+        default=False,help=("Output k-mer/count pairs in "
+        "reverse of the specified order. If -r is specified"
+        "with --sort-by-count, then output will be sorted "
+        "in descending order of the counts, else output will be "
+        "sorted in descending lexicographic order."))
+    opts = argparser.parse_args()
+    #Next we want to make sure the specified alphabet does not contain the start or stop
+    #characters, and error if so. Also print warnings if non-printable or whitespace
+    #characters are specified in the alphabet.
+    check_alphabet(opts.alphabet,opts.start,opts.stop)
+    return opts
+    
+
+def print_counts(counts,sort_by_counts,reverse_order):
+    """A utility function to print a Counter object in the specified order to stdout.
+
+    Inputs:
+        counts         - A Counter object containing (kmer, count of occurences) 
+                         as (key,value) pairs.
+        sort_by_counts - A Boolean specifying whether or not to sort output
+                         by counts of occurences rather than by kmer.
+        reverse_order  - A Boolean specifying to sort output in descending
+                         order rather than the default ascending order.
+    Output:
+        none, simply prints 'counts' to stdout in the specified order.
+
+    print_counts is a simple utility function used to print a Counter object
+    containing kmers as keys and counts of occurences of the kmer as values.
+    All printing done is to stdout.
+    """
+    if sort_by_counts:
+        #If sorting by counts, we sort by the value of the entry, hence itemgetter(1)
+        sorted_counts = sorted(counts.items(),key=itemgetter(1),reverse=reverse_order)
+    else:
+        #Similarly, if sorting by kmer, we're sorting by the key, so itemgetter(0)
+        sorted_counts = sorted(counts.items(),key=itemgetter(0),reverse=reverse_order)
+    for entry in sorted_counts:
+        print("%s %g" % (entry[0], entry[1]))
+
+def main(args):
+    """Main function to direct overall program execution.
+
+    Responsible for calling all other functions, calls the argument parsing function,
+    passes the specified arguments to check_alphabet() to make sure a valid
+    alphabet was specified, and fetches the FASTA parser. The main function is the 
+    function that actually keeps track of the total kmer counts for the entire FASTA 
+    file, adding the kmer counts for each individual sequence to the total running
+    sum, one sequence at a time. After all sequences are read, the final count total
+    is printed.
+    """
+    #First we parse the command line arguments, returning opts, the argparse Namespace
+    # object, and initialize an empty Counter object to store our running total of kmer
+    #counts in the FASTA file.
+    opts = parse_arg()
+    total_counts = Counter()
+    #For each sequence, get its kmer counts, and then add it to the running total 
+    #using the '+=' operator for Counter objects, which adds the counts stored
+    #in both obects in a key-wise manner.
+    for sequence in read_fasta(sys.stdin,opts.alphabet,filter_seqs=True,ignore_case=True):
+        sequence_counts=count_kmers(sequence.sequence,opts.order+1,
+            opts.start,opts.stop)
+        total_counts += sequence_counts
+    print_counts(total_counts,opts.count_sort,opts.reverse)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

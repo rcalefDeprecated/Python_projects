@@ -1,0 +1,371 @@
+#! /usr/bin/env python2.7
+"""This program takes in FASTQ data, and trims off all data after a base with a quality score below the cutoff.
+
+(If this message is being read in the help message, a less poorly formatted version of this message can be 
+found at the docstring at the beginning of this file, just open this file in your favorite text editor.)
+
+endtrim
+BME 205 Fall 2014, Programming Assignment #2
+October 17th, 2014
+Robert Calef
+
+A rudimentary end trimming program that cuts off all bases and their corresponding
+quality scores including and after the first base with a quality score below the 
+specified threshold. Input can be provided in either FASTQ with quality scores in 
+either Phred+33 or Phred+64 format, or FASTA format with an additional, required, 
+quality score file containing quality score information in a FASTA-like format as 
+described below:
+
+      -Each entry begins with a header line, exactly like a FASTA entry header, starting with '>'
+        and containing the sequence ID and commment.
+      -The following line (or lines) consist of whitespace separated integers, the i'th integer
+        specifying the Phred quality score of the i'th symbol in the corresponding FASTA sequence
+      -The quality score entries appear in the exact same order as the entries in the FASTA file
+        i.e. Entry 1 in the quality file is the quality data for Entry 1 in the FASTA file, and so on
+
+    An example entry:
+
+        >sequence_ID comment, both same as corresponding entry in FASTA filei
+        30 28 54 34 12 64 23 7 5 2 19 ...
+        6 59 32 ...
+        .
+        .
+        .
+    Errors will be printed if there are either fewer, or more, FASTA entries than quality 
+    score entries, and pairs of FASTA and quality score entries that have mismatched 
+    sequence and quality score length will be discarded after an error is reported.
+
+If no options are specified, then stdin will be read for data in FASTQ format 
+ith Phred+33 scores, and output will go to stdout in the same format.
+
+While only one input format can be specified at a time, multiple output options 
+can be specified, resulting in output being printed to multiple files in various 
+formats. 
+
+endtrim also supports a user-defined alphabet for the sequence data being read 
+in, as well detecting letters not in the alphabet, and either printing 
+a warning by default, or optionally discarding the characters and suppressing 
+warnings. Checking sequence letters for membership in the alphabet is not case 
+sensitive by default. 
+
+Default alphabets and detailed descriptions for all the options can be found in the 
+help message printed via "endtrim --help". While the program was implemented with 
+end trimming in mind, it can also be used as a format converter by specifying 
+'--min_qual=0' and the appropiate input and output options.
+"""
+from __future__ import print_function
+import sys
+import argparse
+
+from fasta_fastq_parser import fastq_seq,read_fastq, read_fasta_with_quality
+
+class output_container:
+    """A convenience class used to gather together all the output streams.
+
+    The output_container class is a small, convenience class that holds the
+    various output streams allowed by the program, and serves only to simplify
+    passing around the output streams between functions, as well as using the
+    field names to identify each output streams desired output format.
+    """
+    def __init__(self,out33,out64,out_fasta,out_qual):
+         self.out_33=out33
+         self.out_64=out64
+         self.out_fasta=out_fasta
+         self.out_qual=out_qual
+
+def input_type(filename):
+    """A convenience function used in parse_arg to allow '-' to signify stdin.
+
+    This function defines a custom type for the argparse.add_argument() function,
+    which serves the same purpose as 'type=argparse.FileType('r')' except with
+    the added functionality of returning sys.stdin if the given filename is '-'.
+    """
+    if filename == "-": return sys.stdin
+    else: return open(filename, 'r')
+
+def parse_arg():
+    """Parses command line arguments, returning appropriate values in a Namespace object.
+    
+    parse_arg() takes no inputs, as the parse_args() method acceses the command line
+    arguments directly. This function constructs an ArgumentParser object with various
+    arguments specified in the --help message of this program. 
+
+    The various types of input format are all mutually exclusive, that is, only one type 
+    of input format can be specified from the command line (with the exception of 
+    --in_fasta which requires a quality file be passed in via --in_qual as well). 
+    The returned Namespace object contains a field for each possible type of input format, 
+    while this is redundant in terms of storing the input file object itself, the name of
+    the field containing the input file handle serves as a rudimentary method of checking 
+    the specified format of the file handle being stored. 
+    """
+#Construct initial ArgumentParser object
+    argparser = argparse.ArgumentParser(description = __doc__)
+#As we only want to allow one input data set for trimming at a time, make
+#all input types mutually exclusive, with the exception of --in_qual
+#which can't be mutually exclusive to --in_fasta for a complete dataset.
+    input_format = argparser.add_mutually_exclusive_group()
+    input_format.add_argument('--in_33', action = 'store',
+         type=input_type,
+         dest = 'in_33', help = ("Specifies the name of an input FASTQ "
+         "file with scores in Phred+33 format."))
+    input_format.add_argument('--in_64', action = 'store',
+         type = input_type,
+         dest = 'in_64', help = ("Specifies the name of an input FASTQ "
+         "file with scores in Phred+64 format."))
+    input_format.add_argument('--in_fasta', action = 'store',
+         type = input_type,
+         dest = 'in_fasta', help = ("Specifies the name of "
+             "sn input FASTA file. Requires a file with numerical quality "
+             "scores specified by --in_qual."))
+    argparser.add_argument('--in_qual', action = 'store',
+         type = input_type,
+         dest = 'in_qual', help =("Specifies the name of "
+             "the input quality file containing numerical scores "
+             "corresponding to the FASTA sequences specified by "
+             "--in_fasta."))
+    output_format = argparser.add_argument_group(title="Output formatting options")
+    output_format.add_argument('--out_33', action = 'store',
+        type = argparse.FileType('w'),
+        dest = 'out_33', help = ("Outputs sequence information in "
+        "FASTQ format with Phred+33 scores to the specified file."))
+    output_format.add_argument('--out_64', action = 'store',
+         type = argparse.FileType('w'),
+         dest = 'out_64', help = ("Outputs sequence information in "
+         "FASTQ format with Phred+64 scores to the specified file."))
+    output_format.add_argument('--out_fasta', action = 'store',
+         type = argparse.FileType('w'),
+         dest = 'out_fasta', help = ("Outputs sequences in FASTA format "
+         "to the specified file."))
+    output_format.add_argument('--out_qual', action = 'store',
+         type = argparse.FileType('w'),
+         dest = 'out_qual', help =("Outputs sequence quality scores in "
+         "numerical FASTA-like format to the specified file."))
+    argparser.add_argument('--min_qual',action='store', type = int,
+         required=True, help=("Minimum quality score, if a base with a "
+         "lower quality score is found, then all bases at that "
+         "position or later will be trimmed off of the sequence."))
+    argparser.add_argument('--alphabet',action='store',help=(
+         "Defines an alphabet of characters for the sequences to be"
+         " parsed. Any non-whitespace character that is not in the "
+         "defined alphabet will be discarded from the sequence. "
+         "WARNING: This options does not remove any quality scores,"
+         " be very careful when using this option, as it may lead "
+         "to sequences being discarded due to inequal sequence and "
+         "quality score string lengths. If not specified, default "
+         "alphabets will be used, for FASTQ sequences, this consists"
+         " of all degenerate nucleotide codes, and '-' and '*', the "
+         "gap and translation stop charcacters respectively. For "
+         "FASTQ sequences, the default alphabet does not include "
+         "one letter amino acide codes, only degenerate nucleotides,"
+         " '_', and '*'."))
+    argparser.add_argument('--filter_seqs',action='store_true',
+         default=False, help=(
+         "Specifies the program to act as a filter, causing it to "
+         "suppress warnings when encountering non-whitespace "
+         "characters that are not in the defined alphabet. "
+         "The default action when this is not specified is to report"
+         " warnings for any non-whitespace non-alphabet character "
+         "encountered during parsing. WARNING: Be very careful"))
+    argparser.add_argument('--case_sensitive',action='store_false',
+         default=True,help=("Specifies that membership in the alphabet"
+         "should be checked in a case sensitive manner. By default, all "
+         "characters are converted to upper case, as all default "
+         "alphabets contain upper-case nucleotide and amino acid codes."))
+    options = argparser.parse_args()
+    return options
+
+def get_input_sequences(opts):
+    """A utility function to convert the options Namespace object to the desired input parser.
+
+    Input:
+         opts - The Namespace object returned by parse_args()
+    Output:
+         seq_parser - A generator yielding FASTQ sequences from the specified input file(s)
+
+    get_input_sequences takes the Namespace object returned by parse_args(), and parses
+    the filenames, creating a generator yielding fastq_seq objects from the provided input files
+    using the field name to choose the appropriate format for the file. A key part of this
+    function is the fact that all the input options are mutually exclusive, meaning that
+    only the field corresponding to the specified file format will have a non-None object.
+    If no input options were specified, input is read from stdin in FASTQ+33 format.
+    """
+#Assume FASTQ+33 input from stdin by default.
+    seq_parser = read_fastq(sys.stdin,33,opts.alphabet,opts.filter_seqs,opts.case_sensitive)
+    if opts.in_33 is not None:
+         seq_parser = read_fastq(opts.in_33,33)
+    if opts.in_64 is not None:
+         seq_parser = read_fastq(opts.in_64,64)
+    if opts.in_fasta is not None:
+#Need to print error if --in_fasta is specified without --in_qual.
+         if opts.in_qual is None:
+             print("FASTA input file requires a quality score file"
+             " to be specified with --in_qual.", file=sys.stderr)
+             sys.exit(1)
+#Can't read FASTA data and quality data from same file (namely can't get both from stdin)
+#hence we want to print an error if the two inputs have the same name.
+         elif opts.in_qual.name == opts.in_fasta.name:
+             print("FASTA input file and quality score file cannot"
+             " be same file (both cannot come from stdin).")
+             sys.exit(1)
+         seq_parser = read_fasta_with_quality(opts.in_fasta,opts.in_qual)
+    return seq_parser
+
+def get_outputs(opts):
+    """A utility function to gather the output streams in the options Namespace object in to an output_container.
+
+    Input:
+         opts - The Namespace object returned by parse_args()
+    Output:
+         output_container - A simple object containing all the output streams specified by the user. Contains
+                            a field for each type of output format, with the output stream of the corresponding
+                            file stored in the field if a file was given, or None otherwise. For completeness of
+                            this function definition, a brief description of the fields follows:
+                                output_container.out33     - Output stream for data in FASTQ+33 format
+                                output_container.out64     - Output stream for data in FASTQ+64 format
+                                output_container.out_fasta - Output stream for FASTA sequence entries
+                                output_container.out_qual  - Output stream for quality score data in FASTA-like
+                                                             format as described in fasta_fastq_parser.py
+
+    get_outputs simply takes the Namespace object returned by parse_args(), and converts it into an
+    output_container object, which gathers together all the output streams needed by the program. The main
+    purpose of this parsing other than convenience, is also to open the default output, data in FASTQ+33
+    format to stdout, if no output options were specified.
+    """
+#Initialize temporary variables for the various possible output streams to None, allows
+#us to check whether or not to print to the stream with 'if stream is not None'.
+    out33 = out64 = out_fasta = out_qual = None
+#If no other outputs specified, default_output will be True, and we'll use stdout
+#as our output stream for data in FASTQ+33 format.
+    default_output=True
+    if opts.out_33 is not None:
+         out33 = opts.out_33
+    default_output=False
+    if opts.out_64 is not None:
+         out64 = opts.out_64
+         default_output=False
+    if opts.out_fasta is not None:
+         out_fasta = opts.out_fasta
+         default_output=False
+    if opts.out_qual is not None:
+         out_qual = opts.out_qual
+         default_output=False
+    if default_output:
+         out33 = sys.stdout
+    return output_container(out33,out64,out_fasta,out_qual)
+
+def write_fastq(seq,offset,output):
+    """A small function to write a fastq_seq object to a file as a FASTQ entry.
+
+    Inputs:
+         seq    - A fastq_seq object to be printed.
+         offset - The desired Phred score offset to be used when converting
+                  numerical Phred scores to printable characters, typically 33 or 64.
+         output - The output stream to write the FASTQ entry to.
+    Output:
+         Does not return anything, simply prints the data in FASTQ format to the stream 
+         specified by 'output'.
+
+    write_fastq is a simple function used to facilitate writing FASTQ entries to a file
+    in various Phred score offsets. 
+    """
+#If comment is the empty string, just print the sequence ID, if comment isn't blank,
+#then print sequence_ID followed by a space, followed by the comment.
+    id_comment = seq.identifier
+    if seq.comment != "":
+        id_comment += " " + seq.comment
+    output.write("@%s\n%s\n+%s\n" % (id_comment
+        ,seq.sequence,id_comment))
+#Convert each numerical score to a character by adding the offset, and write it.
+    for score in seq.scores:
+        code = score + offset
+        output.write(chr(code))
+    output.write("\n")
+
+
+def write_sequence(seq,outputs):
+    """Writes the sequence 'seq' to any non-None output streams in the output_container 'outputs'.
+
+    Inputs:
+         seq     - A fastq_seq object to be printed.
+         outputs - An output_container object containing the various output streams to print data
+                   to.
+    Output:
+         Does not return anything, just prints the specified sequence to the given output streams.
+
+    write_sequence is a function used to write a single piece of FASTQ data to multiple output
+    streams in various formats. It uses the write_fastq function defined above to write data in
+    FASTQ format, and does any writing of data in FASTA format or FASTA-like quality score format.
+    """
+#If comment is the empty string, just print the sequence ID, if comment isn't blank,
+#then print sequence_ID followed by a space, followed by the comment
+    id_comment = seq.identifier
+    if seq.comment != "":
+         id_comment += " " + seq.comment
+#Next check each field of the output_container to see if there's a non-None output
+#stream to print to, and if so, print data to it in the appropriate format.
+    if outputs.out_33 is not None:
+        write_fastq(seq,33,outputs.out_33)
+    if outputs.out_64 is not None:
+        write_fastq(seq,64,outputs.out_64)
+    if outputs.out_fasta is not None:
+         outputs.out_fasta.write(">%s\n%s\n" % (id_comment,seq.sequence))
+    if outputs.out_qual is not None:
+        outputs.out_qual.write(">%s\n" % (id_comment))
+        for score in seq.scores:
+            outputs.out_qual.write("%d   " % (score))
+        outputs.out_qual.write("\n")
+
+def cleanup(outputs):
+    """A simple utility function to close any open file streams.
+
+    Input:
+         outputs - An output_container object containing potentially open file streams.
+    Output:
+         Does not return anything, simply closes open file streams if present.
+    
+    cleanup checks all the fields of the output_container 'outputs' for a non-None stream
+    and, if found, attempts to close it.
+    """
+    if outputs.out_33 is not None:
+        outputs.out_33.close()
+    if outputs.out_64 is not None:
+        outputs.out_64.close()
+    if outputs.out_fasta is not None:
+        outputs.out_fasta.close()
+    if outputs.out_qual is not None:
+        outputs.out_qual.close()
+
+
+def main(args):
+    """Main function to direct overall program execution.
+    
+    Responsible for calling all other functions, fetches the appropriate FASTQ parser,
+    received yielded fastq_seq objects, and does the actual endtrimming of the sequence.
+    End trimming is accomplished by iterating over the list of quality scores until a 
+    score below the cutoff is found, and then trimming off the ends of both the sequence 
+    itself, and the list of quality scores, beginning at that index.
+    """
+#First, parser our arguments, returning opts, the argparse Namespace object.
+    opts = parse_arg()
+#Next get our input parser that will yield each FASTQ sequence as a fastq_seq object
+#also want to get our output streams ready, as we will output data from each FASTQ
+#sequence before reading in another FASTQ sequence.
+    input_seqs = get_input_sequences(opts)
+    output_streams = get_outputs(opts)
+    for seq in input_seqs:
+        i=0 
+#Iterate over the quality scores to get the index of the first score below the cutoff
+        for score in seq.scores:
+            if score < opts.min_qual: break
+            i += 1
+#Trim the sequence and scores up to the index of the first score below the cutoff, if
+#this is the first score, then the empty sequence and list will be obtained respectively,
+#if all scores are above the cutoff, the sequence and scores will be unchanged.
+        seq.sequence = seq.sequence[0:i]
+        seq.scores = seq.scores[0:i]
+        write_sequence(seq,output_streams)
+    cleanup(output_streams)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

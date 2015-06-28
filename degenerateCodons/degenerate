@@ -1,0 +1,627 @@
+#! /usr/bin/env python2.7
+"""A program for calculating optimal degenerate nucleotide codons for a desired amino acid set.
+
+degenerate
+BME 205 Fall 2014, Programming Assignment #9
+December 17th, 2014
+Robert Calef
+
+degenerate is intended for use in determining the optimal degenerate nucleotide codon to
+represent an amino acid set of interest. Often times when performing a directed mutagenesis
+experiment, one wishes to mutate a certain amino acid of a protein to a variety of amino
+acids. Typically this is accomplished using a codon consisting of degenerate nucleotide 
+symbols, so as to represent a variety of standard nucleotide codons. 
+
+However, under a given genetic code, not all possible amino acid sets can be represented 
+using a single degenerate codon, in fact, the majority of the possible amino acid sets will
+not be encoded by an individual degenerate codon. Hence this program allows the user to
+quickly determine all possible amino acid sets that can be encoded by a degenerate codon in
+a given organism, incorporating organism-specific codon usage data and allowing for various
+genetic codes.
+
+A single degenerate codon may not evenly represent all amino acids it can encode for, the
+degenerate codon might represent multiple standard nucleotide codons for one amino acid, 
+and only a single codon for another amino acid. For this purpose, a measure of imbalance is
+also defined, giving a measure of how evenly the amino acid set is represented by the 
+degenerate codon. Similarly, the average usage of a degenerate codon is also defined as a
+measure of utility of the degenerate codon, defined as the average frequency of all the
+standard nucleotide codons represented by the degenerate codon. For a more rigorous 
+definition of imbalance and average usage see the docstrings for the 'calculate_imbalance'
+and 'calculate_degenerate_usage' functions respectively.
+
+If specified, alternate genetic codes can be read from the web. Similarly, a codon usage
+table can be read either from the web or from a local file.
+
+Output from the program will not contain any information about amino acid sets that cannot
+be encoded by a degenerate codon. Output is available in one of three formats:
+
+    minimal    - One line per amino acid set, each line containing three tab-separated 
+                 fields: the amino acid set in alphabetical order, the minimum imbalance,
+                 and the most frequent degenerate codon with minimal imbalance. An example 
+                 line might look like:
+                 		ACGPRSW	  0.083	   BSS
+
+    min-codons - One line per amino acid set, exactly like the 'minimal' format, except
+                 listing all degenerate codons with minimal imbalance in a comma-separated
+                 list, sorted in order of decreasing frequency. An example line follows:
+                                ACGPRSW	  0.083	   BSS,BSK
+
+    full       - One line per amino acid set, each line containing two tab-delimited 
+                 fields: the amino acid set in alphabetical order, and a list of all
+                 degenerate codons encoding the amino acid set, along with their imbalance
+                 and frequencies. Degenerate codons will be listed within a square-bracket
+                 list as follows:
+                   ACGPRSW	['BSS,0.083,0.0159','BSK,0.083,0.0147','BSB,0.111,0.0151']
+
+                 Each degenerate codon has three pieces of data which are, in order from 
+                 left to right: the degenerate codon, imbalance, and average frequency. The
+                 list of degenerate codons will be sorted first by increasing imbalance, and
+                 second by decreasing frequency. That is, the most frequent degenerate codon
+                 with minimal imbalance will be outputted first, and the least frequenct 
+                 codon with maximum imbalance will be listed last.
+
+                 Note that each degenerate codon's set of data is enclosed with apostrophes,
+                 with commas separating sets of degenerate codon data, and also separating
+                 the individual fields in each degenerate codon's set of data.
+
+All output formats will print amino acid sets in alphabetical order by amino acid set.
+
+For more information on command-line options to specify an output format, genetic code,
+and usage table, see the --help message of this program. 
+"""
+from __future__ import print_function
+import sys
+import argparse
+import string
+import gzip
+import re
+from operator import itemgetter
+from collections import Counter
+from urllib2 import urlopen
+from itertools import product
+
+
+#Globally define the mapping of degenerate nucleotide characters to standard nucleotide
+#symbols, also define the standard genetic code for use if no other genetic code is 
+#specified.
+degenerate_nucleotides = dict({'A':'A','T':'T','C':'C','G':'G','R':'GA','Y':'TC','K':'GT',
+                               'M':'AC','S':'GC','W':'AT','B':'GTC','D':'GAT','H':'ACT',
+                               'V':'GCA','N':'AGCT'})
+standard_genetic_code = dict({'TTT':'F','TTC':'F','TTA':'L','TTG':'L','TCT':'S','TCC':'S',
+                              'TCA':'S','TCG':'S','TAT':'Y','TAC':'Y','TAA':'*','TAG':'*',
+                              'TGT':'C','TGC':'C','TGA':'*','TGG':'W','CTT':'L','CTC':'L',
+                              'CTA':'L','CTG':'L','CCT':'P','CCC':'P','CCA':'P','CCG':'P',
+                              'CAT':'H','CAC':'H','CAA':'Q','CAG':'Q','CGT':'R','CGC':'R',
+                              'CGA':'R','CGG':'R','ATT':'I','ATC':'I','ATA':'I','ATG':'M',
+                              'ACT':'T','ACC':'T','ACA':'T','ACG':'T','AAT':'N','AAC':'N',
+                              'AAA':'K','AAG':'K','AGT':'S','AGC':'S','AGA':'R','AGG':'R',
+                              'GTT':'V','GTC':'V','GTA':'V','GTG':'V','GCT':'A','GCC':'A',
+                              'GCA':'A','GCG':'A','GAT':'D','GAC':'D','GAA':'E','GAG':'E',
+                              'GGT':'G','GGC':'G','GGA':'G','GGG':'G'})
+
+
+def parse_arg():
+    """Parses command line arguments, returning appropriate values in a Namespace object.
+
+    parse_arg() takes no inputs, as the parse_args() method accesses the command line 
+    arguments directly. This function constructs an ArgumentParser object with various
+    options specified in the --help message of this program.
+
+    No arguments are required. By default, possible amino acid sets will be calculated
+    using the standard genetic code, codon usage statistics from E. coli CFT073, and 
+    outputting in 'minimal' format.
+    """
+    argparser = argparse.ArgumentParser(
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description = __doc__)
+    argparser.add_argument('-u','--usage_table',action='store', 
+        default="http://www.kazusa.or.jp/codon/cgi-bin/showcodon.cgi?species=199310",
+        help=("Optionally specify a file or URL to read a codon usage table from in the "
+        "format used by the Codon Usage Database (http://www.kazusa.or.jp/codon/). For a "
+        "detailed description of the format, see the  docstring for the 'read_usage_table'"
+        " function in this file. Defaults to reading the codon usage table for E. coli "
+        "CFT073 from the web."))
+    argparser.add_argument('-g','--genetic_code', action = 'store',
+        type=int,help =("An integer giving the id of a genetic code stored in NCBI's "
+        "genetic code table (ftp://ftp.ncbi.nih.gov/entrez/misc/data/gc.prt). The specified"
+        " genetic code will be read from the web and used to map nucleotide codons to amino"
+        " acids (and the stop character '*'). Defaults to using a hard-coded standard "
+        "genetic code, can be used in the absence of an internet connection.")) 
+    argparser.add_argument('-o', '--output_format', action = 'store', default = "minimal",
+        choices=['minimal','min-codons','full'],
+        help=("Specifies the output format. For a detailed description of the available "
+        "output formats, see the --help message of this program. Defaults to 'minimal' "
+        "output format."))
+    opts = argparser.parse_args()
+    return opts
+
+def read_ncbi_genetic_code(id_num):
+    """Reads a specified genetic code from NCBI's online genetic code table.
+
+    Input:
+        id_num      - An integer specifying the id number of the desired genetic code. Id
+                      numbers are defined by the 'id x ,' line in the NCBI genetic code 
+                      table, where x is an integer. For a list of possible genetic codes 
+                      and their respective id numbers, please see the NCBI genetic code 
+                      table linked to in the help message of this program.
+ 
+                      If the provided id number is not a valid NCBI genetic code id (i.e.
+                      no genetic code with that id number), then an error will be printed
+                      followed by exiting via sys.exit(1).
+    Output:
+        trans_table - A dict object with strings as both keys and values, mapping standard 
+                      nucleotide codons as strings to amino acid characters (including '*' 
+                      for stop). That is, trans_table["ATG"] will be the single letter code 
+                      of the amino acid encoded by "ATG" in the specified genetic code, 'M'
+                      if the standard genetic code was specified. Only codons containing 
+                      only standard DNA nucleotides (ACGT) will be present in 'trans_table'.
+
+    This function serves as a utility function to take in an integer specifying a NCBI
+    genetic code, and returns a dict object that maps standard nucleotide codons to an
+    amino acid symbol under the specified genetic code. The NCBI genetic code table will
+    be read from the internet, thus a working internet connection is a prerequisite to
+    using this function.
+    """
+    #First we need to open the NCBI genetic code table for reading, also initializing
+    #'id_line' to allow us to find the correct genetic code given the possible ambiguity
+    # of searching for an id of '1' when id numbers like '11' and '21', and 'found_id' to
+    #keep track of where in the parsing we are. 'trans_table' holds the translation table
+    #as it is read in from the file.
+    ncbi_genetic_codes = urlopen("ftp://ftp.ncbi.nih.gov/entrez/misc/data/gc.prt")
+    id_line = "id " + str(id_num) + " ,"
+    found_id = False
+    trans_table = dict()
+
+    for line in ncbi_genetic_codes:
+        #Want to iterate over all lines until we hit the id line for our id number of 
+        #interest, the first line after the desired id line contains all the translation
+        #information in a standardized order:
+        #        "TTT" "TTC" "TTA" "TTG" ... "GGT" "GGC" "GGA" "GGG"
+        #Actual amino acid symbols start after the first " character on the line after the
+        #the id line.
+        if id_line in line:
+            found_id = True
+            continue
+        if not found_id: continue
+        index = string.find(line,'"') + 1
+        for codon in product("TCAG",repeat=3):
+            trans_table[''.join(codon)] = line[index]
+            index += 1
+        break
+
+    if not found_id:
+        #If we reach the end of the file without seeing the specified id number, then the
+        #given id number does not correspond to a NCBI genetic code, so print an error 
+        #and exit
+        print("ERROR: Invalid genetic code id number: %d\nCheck the following file for valid"
+              "genetic code id numbers:\nftp://ftp.ncbi.nih.gov/entrez/misc/data/gc.prt",
+              file=sys.stderr)
+        sys.exit(1)
+    return trans_table
+
+def split_degenerate(degen_seq):
+    """Takes in a degenerate nucleotide sequence, and yields each possible standard nucleotide sequence it can represent, one at a time.
+
+    Input:
+        degen_seq - A string containing a sequence of degenerate nucleotide characters
+                    (ACGTRYKMSWBDHVN).
+ 
+                    If 'degen_seq' contains an illegal character (not one of the 15
+                    degenerate nucleotide characters), the offending character will be
+                    printed in an error message followed by exiting via sys.exit(1).
+    Output:
+        seq       - A string containing only standard nucleotide characters (ACGT). This
+                    sequence will be a sequence that can be represented by 'degen_seq'.
+
+    split_degenerate is a generator which takes in a degenerate nucleotide sequence, and 
+    yields all possible standard nucleotide sequences represented by the given degenerate
+    sequence, yielding one sequence at a time. split_degenerate assumes the standard 
+    mapping of degenerate nucleotide symbols to standard nucleotide symbols. For more 
+    information on degenerate base symbols, see the Wikipedia article on 
+    "Nucleic acid notation".
+    """
+    #Overall, we treat each set of standard nucleotide symbols encoded by a degenerate
+    #nucleotide symbol as an individual alphabet. We store in a list an alphabet for each 
+    #character in 'degen_seq', as determined by the hardcoded mapping of degenerate bases 
+    #to standard bases. The Cartesian product of all alphabets in our list of alphabets 
+    #then gives all possible standard nucleotide sequences represented by 'degen_seq'.
+    alphabets = []
+    for letter in degen_seq: 
+        if letter not in degenerate_nucleotides:
+            #If the letter is not a valid degenerate base, print the character and error out
+            print("ERROR: Invalid degenerate nucleotide symbol passed to "
+                  "'split_degenerate': %s" % letter)
+            sys.exit(1)
+        alphabets.append(degenerate_nucleotides[letter])
+    #Finally, yield all standard nucleotide sequences using Python's "splat" operator
+    for seq in product(*alphabets): yield ''.join(seq)
+
+def generate_degenerate_codon_table(trans_table):
+    """Generate a mapping of all possible degenerate codons to a set of encoded amino acids.
+
+    Input:
+        trans_table - A dict object with strings as both keys and values, mapping standard 
+                      nucleotide codons as strings to amino acid characters (including '*' 
+                      for stop). That is, trans_table["ATG"] will be the single letter code 
+                      of the amino acid encoded by "ATG" in the specified genetic code, 'M'
+                      if the standard genetic code was specified. Only codons containing 
+                      only standard DNA nucleotides (ACGT) will be present in 'trans_table'.
+    Output:
+        codon_table - A dict object mapping degenerate nucleotide codons as strings to 
+                      Counter objects representing the set of amino acid symbols (including 
+                      '*' for stop) that can be encoded for using the given degenerate codon.
+                      That is, codon_table["CAH"] will be a Counter object that specifies 
+                      the number of ways "CAH" can encode for various amino acids. Under
+                      the standard genetic code, we would have:
+                         codon_table["CAH"] = {'H':'2','Q':'1'}
+                      corresponding to the three standard codons "CAT", "CAC", and "CAA".
+
+    This function serves primarily to produce a description of degenerate nucleotide 
+    codons under a specific genetic code by returning a dictionary mapping all possible
+    degenerate nucleotide codons to the set of amino acids they could encode. The 
+    degenerate nucleotide alphabet used is hard-coded as "ACGTRYKMSWBDHVN".
+    """
+    #We first initialize the overall degenerate codon table, 'codon_table', then for each
+    #degenerate codon, intialize a new Counter object for that degenerate codon, and then
+    #increment the appropriate amino acid's count after translating each possible standard
+    #nucleotide codon encoded by 'degen_codon'. After counts have been stored for all 
+    #possible degenerate codons, return the codon table.
+    codon_table = dict()
+    for degen_codon in product(degenerate_nucleotides.keys(), repeat=3):
+        amino_acids = Counter()
+        degen_codon = ''.join(degen_codon)
+        for codon in split_degenerate(degen_codon): amino_acids[trans_table[codon]] += 1
+        codon_table[degen_codon] = amino_acids
+    return codon_table
+
+def calculate_imbalance(aa_set):
+    """A convenience function to calculate the imbalance in an amino acid set.
+
+    Input:
+        aa_set    - A Counter object representing an amino acid multiset. aa_set['M'] is 
+                    the number of times 'M' occurs in the multiset.
+    Output:
+        imbalance - A float giving a measure of the imbalance in the amino acid multiset
+                    represented by 'aa_set'. Imbalance for a degenerate codon is defined 
+                    as the largest difference between the number of codons for an amino 
+                    acid, normalized by the total number of codons represented. That is,
+                    the difference between the number of codons for the most represented
+                    amino acid and the number of codons for the least represented amino
+                    acid, divided by the total number of codons represented by the 
+                    degenerate codon.
+                    
+                    If 'aa_set' is empty, then 'imbalance' will be zero. This decision was
+                    made to prevent this function from crashing if given an empty set.
+                    
+    
+    calculate_imbalance is a convenience function that takes in an amino acid multiset
+    as a Counter object and returns the imbalance of the multiset as a float.  
+    """
+    #Want to check if 'aa_set' is empty, if so return zero to prevent crashes using
+    #max, min, and sum on an empty iterable.
+    if not aa_set: return 0
+    aa_counts = aa_set.values()
+    return (max(aa_counts) - min(aa_counts))/float(sum(aa_counts))
+
+def calculate_degenerate_usage(degen_codon,usage_table):
+    """Calculate average usage of a degenerate codon given a codon usage table.
+
+    Inputs:
+        degen_codon - A string giving a degenerate nucleotide codon to calculate average
+                      usage for, that is a string consisting of three degenerate 
+                      nucleotide symbols.
+
+        usage_table - A dict object containing codon usage data, structured like the dict
+                      returned by the 'read_usage_table' function. 'usage_table' must be
+                      a dict using standard nucleotide codons as strings for keys, and a
+                      tuple with two pieces of data as values:
+                        usage_table["ATG"] = (per_thousand,number)
+
+                      per_thousand - A float giving the number of times this codon was 
+                                     seen per thousand codons investigated.
+                      number       - An integer giving the total number of times this
+                                     codon was seen across all coding sequences analyzed.
+
+                      For a more detailed description of the format for 'usage_table', see
+                      the docstring for the 'read_usage_table' function.
+    Output:
+        avg_usage  - A float giving the average usage of 'degen_codon' as a number from 
+                     zero to one. Average usage is calculated by summing the 'per_thousand'
+                     count for each standard nucleotide codon represented by 'degen_codon'
+                     (divided by 1000), and then dividing the total by the total number of
+                     codons represented by 'degen_codon'.
+ 
+    This function is used to obtain a crude measure of the frequency with which a given
+    degenerate nucleotide codon occurs in a certain organism. The measure used is simply
+    the average of the frequencies of all standard nucleotide codons represented by the
+    degenerate codon.
+    """
+    #Initialize 'total_usage', the running sum of usage values across all standard
+    #nucleotide codons, then add 'per_thousand' data for each standard codon represented
+    #by 'degen_codon' to the running total.
+    total_usage = 0.0
+    for num_codons,codon in enumerate(split_degenerate(degen_codon)):
+        per_thousand,number = usage_table[codon]
+        total_usage += per_thousand
+
+    #Need to convert num_codons from 0-based to 1-based, then calculate average as a
+    #number from 0 to 1 by normalizing by 1000 times the number of standard codons
+    num_codons += 1
+    avg_usage = total_usage/(1000 * num_codons)
+    return avg_usage
+
+def codon_table_to_aa_table(codon_table,usage_table):
+    """Convert a degenerate codon table to an amino acid set table.
+
+    Input:
+        codon_table - A dict object mapping degenerate nucleotide codons as strings to
+                      Counter objects representing the set of amino acid symbols (including
+                      '*' for stop) that can be encoded for using the given degenerate codon.
+                      That is, codon_table["CAH"] will be a Counter object that specifies
+                      the number of ways "CAH" can encode for various amino acids. Under
+                      the standard genetic code, we would have:
+                         codon_table["CAH"] = {'H':'2','Q':'1'}
+                      corresponding to the three standard codons "CAT", "CAC", and "CAA".
+        
+        usage_table - A dict object containing codon usage data, structured like the dict
+                      returned by the 'read_usage_table' function. 'usage_table' must be
+                      a dict using standard nucleotide codons as strings for keys, and a
+                      tuple with two pieces of data as values:
+                        usage_table["ATG"] = (per_thousand,number)
+
+                      per_thousand - A float giving the number of times this codon was
+                                     seen per thousand codons investigated.
+                      number       - An integer giving the total number of times this
+                                     codon was seen across all coding sequences analyzed.
+
+                      For a more detailed description of the format for 'usage_table', see
+                      the docstring for the 'read_usage_table' function.
+    Output:
+        aa_table    - A dict object mapping amino acid sets as strings to data for
+                      degenerate codons that can encode the given amino acid set. Amino
+                      acid sets are stored as strings of single-letter amino acid codes
+                      (including '*' for stop) with the characters appearing in descending
+                      lexicographic order going from left to right. As this string 
+                      represents a set, each letter can occur only once. 
+ 
+                      As not all amino acid sets can be encoded by a degenerate codon, some
+                      amino acid sets will not have entries in 'aa_table'. If an amino acid
+                      set is in the table, its entry will contain a list of tuples, one
+                      tuple for each degenerate codon that can encode the given amino acid
+                      set.
+                          aa_table[aa_set] = [(codon,imbalance,usage),...]
+                      codon     - A string giving a degenerate codon that can encode the 
+                                  amino acid set 'aa_set' under the given genetic code.
+                      imbalance - A float giving the imbalance of 'codon', as defined in
+                                  the docstring of the 'calculate_imbalance' function.
+                      usage     - A float giving the average frequency of standard 
+                                  nucleotide codons represented by the degenerate codon
+                                  'codon'. For a more rigorous description, see the 
+                                  docstring for the 'calculate_degenerate_usage' function.
+
+                      An example entry could look something like this:
+                         aa_table["ACGPRSW"] = [('BSS', 0.08, 0.0159), 
+                                ('BSK', 0.08, 0.0147), ('BSB', 0.11, 0.0151)]
+
+                      Each list of degenerate codon data will be sorted first in ascending
+                      order of imbalance (lowest imbalance first) and sorted second in
+                      descending order of frequency (highest frequency for a given 
+                      imbalance value appears first).
+
+    codon_table_to_aa_table is a translation function which takes as input a mapping of 
+    degenerate codons to the set of amino acids the codon can specify, and returns a 
+    mapping of amino acid sets to degenerate codons that can encode the given amino acid
+    set. This function also takes in a codon usage table for the given organism, and 
+    incorporates this data into the description of each degenerate nucleotide codon.
+    """
+    #Initialize 'aa_table' to hold the amino acid table as we build it up. Overall, we
+    #want to iterate over each degenerate codon, get the amino acid set it encodes in a
+    #form that's unique for each set, then either create a new entry in 'aa_table' for
+    #the amino acid set if one is not present, else just append the data for this degenerate
+    #codon to the existing entry for the amino acid set.
+    aa_table = dict()
+    for degen_codon,aa_set in codon_table.items():
+        aa_key = ''.join(sorted(aa_set.keys()))
+        imbalance = calculate_imbalance(aa_set)
+        usage = calculate_degenerate_usage(degen_codon,usage_table)
+        if aa_key not in aa_table:
+            #If amino acid set not in table yet, initialize an empty list for that set.
+            aa_table[aa_key] = []
+        aa_table[aa_key].append((degen_codon,imbalance,usage))
+
+    #After building up all the entries for each amino acid set, we go back through the
+    #table, sorting each amino acid set's entries first by imbalance, and second by
+    #frequency. Sorting is done after rather than inserting in sorted order, as the table
+    #need only be built once.
+    for aa_set in aa_table.keys():
+        degen_codons_data = aa_table[aa_set]
+        degen_codons_data  = sorted(degen_codons_data,key=itemgetter(2),reverse=True)
+        aa_table[aa_set] = sorted(degen_codons_data,key=itemgetter(1))
+    return aa_table
+
+def read_usage_table(source_name):
+    """Fetch a codon usage table from a given input source.
+
+    Input:
+        source_name - A string giving a filename or URL from which to read a codon
+                      usage table. The codon usage table must be in the format used by
+                      the Codon Usage Database (www.kazusa.or.jp/codon/), which is 
+                      described below. 'source_name' will be treated as a URL if and only
+                      if it begins with the sequence of characters "http://", else 
+                      'source_name' will be treated as a filename.
+    Output:
+        usage_table - A dict object containing codon usage data, using standard DNA 
+                      nucleotide codons as strings for keys, and a tuple with two pieces
+                      of data as values:
+                        usage_table[codon] = (per_thousand,number)
+
+                      per_thousand - A float giving the number of times this codon occurred
+                                     per thousand codons seen when obtaining the original 
+                                     codon usage data from coding sequences of the organism
+                                     of interest.
+                      number       - An integer giving the total number of times this
+                                     codon was seen across all coding sequences analyzed.
+                      For example:
+                          usage_table["ATG"] = (27.0,42762)
+
+                      'usage_table' will contain an entry for each possible standard 
+                      nucleotide codon, but no entries for any degenerate nucleotide codons.
+                      
+    read_usage_table is a function that serves to read a input stream containing a codon
+    usage table in the following format. In brief, the format consists of one entry per
+    codon, with each entry in the following form:
+                                   codon per_thousand (number)
+
+        codon - The codon to which the other data pertains
+        per_thousand - Expected number of occurences of 'codon' in 1000 random codons,
+                       typically not an integer.
+        number       - The raw count of occurences of 'codon' across all coding sequences
+                       used to obtain the codon counts.
+    For example, a single entry would look like this:
+                                       UUU 26.3 ( 22246)
+    While the tables provided by the Codon Usage Database have four entries per line,
+    the codon_generator class can be initialized from a codon table with any number
+    of entries per line. Additionally, this format allows for comment lines beginning with
+    the '#' character, which will be ignored by the parser. Codon tables can give either
+    RNA or DNA codons (using U or T respectively), but all occurences of 'U' will be 
+    converted to a 'T'.
+    """
+    #First we initialize 'usage_table', the dict that will store the usage table as we
+    #build it up an entry at a time, as well as 'codon_data' to temporarily store codon 
+    #entries
+    usage_table = dict()
+    codon_data = []
+
+    if source_name.startswith("http://"):
+        #If 'source_name' begins with "http://", we treat it as a URL. Want to get to
+        #the beginning of the codon table, marked by the HTML <PRE> tag on the line
+        #right before the table starts, so iterate over all lines until we hit the
+        #<PRE> tag
+        input_stream = urlopen(source_name)
+        for line in input_stream:
+            if line.startswith("<PRE>"): break
+    else:
+        input_stream = open(source_name,'r')
+
+    for line in input_stream:
+        #Want to skip over comment lines, or break if done reading the table from web.
+        #As the 'number' field is often in parentheses, use the following re to split
+        #the line into strings of non-whitespace, non-parentheses characters to get the
+        #individual fields to iterate over. 'codon' will be used to keep track of which
+        #codon we're currently reading data for.
+        if line.startswith("</PRE>"): break
+        if line.startswith('#'): continue
+        elements = re.findall("[^\s()]+",line)
+        codon=""
+        for num,element in enumerate(elements):
+            #Each entry has 3 fields, hence store a new entry every three
+            #fields, except the first time through, don't want to store
+            #an empty codon. We pull out the individual fields from the
+            #temporary data list 'codon_data', and store the approriate values. 
+
+            #At each step, we just add the field value to our temporary data container
+            #storing the data until we reach the beginning of a new entry.
+            if num % 3 == 0:
+                if codon != "":
+                    codon,per_thousand,number = codon_data
+                    codon = string.replace(codon,"U","T")
+                    usage_table[codon] = (float(per_thousand),int(number))
+                #Update 'codon' to the new codon entry we're about to begin, and reset
+                #the temporary data container 'codon_data'
+                codon=element
+                codon_data=[]
+            codon_data.append(element)
+        #Need to add entries at the end of a line as well, hence the duplication of code below
+        if codon != "":
+            codon,per_thousand,number = codon_data
+            codon = string.replace(codon,"U","T")
+            usage_table[codon] = (float(per_thousand),int(number))
+    return usage_table
+
+def print_output(aa_table,out_format,out_stream):
+    """Print an amino acid set table to a given output stream in the specified format.
+
+    Input:
+        aa_table   - A dict mapping amino acid sets to lists of degenerate codons that
+                     can encode the given amino acid set. For a rigorous definition of how
+                     'aa_table' should be structured, see the docstring for the 
+                     'codon_table_to_aa_table' function.
+
+        out_format - A string specifying an output format. Can be either 'minimal',
+                     'min-codons', or 'full', as defined in the docstring of this program.
+
+           WARNING: If an invalid output format is given, an error will be printed along
+                    with the illegal format specifier, followed by exiting via sys.exit(1).
+
+        out_stream - An output stream to print 'aa_table' to in the format specified by
+                     'out_format'.
+    Output:
+        None, simply prints data to the given output stream in the desired format.
+
+    print_output is a convenience function that gathers together the code necessary to
+    print an amino acid set table in a variety of formats. All output formats will output
+    amino acid set data in descending lexicographic order of the amino acid set represented
+    as a string.
+    """
+    #First we sort the (key, value) pairs of the amino acid set table by the key, and then
+    #simply print the whole list according to the specified format.
+    sorted_aa_table = sorted(aa_table.items(),key=itemgetter(0))
+    if out_format =="minimal":    
+        for aa_set,aa_set_data in sorted_aa_table:
+            top_codon,min_imbalance,max_freq = aa_set_data[0]
+            print("{:>21}\t{:.3f}\t{}".format(aa_set,min_imbalance,top_codon),file=out_stream)
+
+    elif out_format == 'min-codons':
+        for aa_set,aa_set_data in sorted_aa_table:
+            top_codon,min_imbalance,max_freq = aa_set_data[0]
+            out_stream.write("{:>21}\t{:.3f}\t".format(aa_set,min_imbalance))
+            first=True
+            for degen_codon,imbalance,freq in aa_set_data:
+                #Only want to print degenerate codons with minimal imbalance, as the list
+                #is sorted by imbalance, we just break when we hit the first imbalance
+                #value not equal to the first imbalance value in the list.
+                if imbalance != min_imbalance: break
+                if first: 
+                    out_stream.write("{}".format(degen_codon))
+                    first = False
+                else: out_stream.write(",{}".format(degen_codon))
+            out_stream.write("\n")
+
+    elif out_format == "full":
+        for aa_set,aa_set_data in sorted_aa_table:
+            top_codon,min_imbalance,max_freq = aa_set_data[0]
+            out_stream.write("{:>21}\t[".format(aa_set))
+            first=True
+            for degen_codon,imbalance,freq in aa_set_data:
+                if first:
+                    out_stream.write("'{}, {:.3f}, {:.3f}'".format(degen_codon,imbalance,freq))
+                    first = False
+                else: out_stream.write(", '{}, {:.3f}, {:.3f}'".format(degen_codon,imbalance,freq))
+            out_stream.write("]\n")
+
+    else:
+        #If not one of the valid output formats, print an error and exit.
+        print("ERROR: Invalid output format specified: %s" % out_format,file=sys.stderr)
+        sys.exit(1)
+
+
+def main(args):
+    """Main function to direct overall program execution.
+
+    Responsible for calling all other functions, fetches the appropriate genetic code
+    and usage table, then creates a degenerate codon table, translates it to an amino
+    acid set table, and prints it in the specified format.
+    """
+    #First, parse the arguments, returning opts, the argparse Namespace object.  
+    #Then check 'opts' to fetch the appropriate aligner object. If no specified
+    #genetic code, then just use the hard-coded standard code.
+    opts = parse_arg()
+    if opts.genetic_code is None: trans_table = standard_genetic_code
+    else: trans_table = read_ncbi_genetic_code(opts.genetic_code)
+    usage_table = read_usage_table(opts.usage_table)
+    degen_table = generate_degenerate_codon_table(trans_table)
+    aa_table = codon_table_to_aa_table(degen_table,usage_table)
+    print_output(aa_table,opts.output_format,sys.stdout)
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

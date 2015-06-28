@@ -1,0 +1,216 @@
+#!/usr/bin/env python2.7
+"""This program counts the occurences of words in its input, outputting the results to stdout.
+
+wordcount
+BME 205 Fall 2014, Programming Assignment #1
+October 10th, 2014
+Robert Calef
+
+
+usage: wordcount [-h] [--ascend | --descend] [--alpha] [--in_file IN_FILE]
+
+Reads input from stdin, or a file if specified, and splits input into words
+containing alphabetic characters, and outputs pairs of words along with their
+number of occurences to stdout. Words are defined as contiguous sequences of
+characters from the alphabet [a-zA-z'], any other character will act as a
+separator. Output can be sorted in various fashions as specified by the
+command line options, and consists of one word-count pair per line, with the
+word and its count of occurences separated by a single tab.
+
+optional arguments:
+  -h, --help         show this help message and exit
+  --ascend           Returns output sorted in ascending order by counts of
+                     occurrences, this is the default behavior of wordcount.
+  --descend          Returns output sorted in descending order by counts of
+                     occurrences, or in reverse alphabetic order if specified
+                     along with --descend.
+  --alpha            Returns output sorted alphabetically by word. If
+                     specified along with --descend, output is sorted in
+                     reverse alphabetic order. Specifying --alpha and --ascend
+                     gives the same results as only --alpha.
+  --in_file IN_FILE  Optionally specifies a file to read input from. Reads
+                     from stdin if --in_file is not specified.
+
+"""
+from __future__ import print_function
+import sys
+import re
+import collections
+import argparse
+from operator import itemgetter
+
+def parse_arg():
+    """Parses command line arguments, returns values in a Namespace object.
+
+    parse_arg() takes no inputs, as the parse_args() method acceses the command
+    line arguments directly. This function constructs an ArgumentParser object,
+    with various arguments specified in the --help message of this program. 
+    This function returns a Namespace object containing two fields:
+
+        order   - a list of integers describing the output order (described below)
+        in_file - the name of the input file, or None if --in_file is not used
+    
+    The --ascend, --descend, and --alpha options (all the options that have to 
+    do with the ordering of the output) all append a power of 2 to the list 
+    'order' stored in the returned namespace object. These numbers are then 
+    summed to obtain a unique specifier for the ordering of the output. A
+    summary follows below:
+
+    1 - alphabetical sorting
+    2 - sorting in ascending order
+    4 - sorting in descending order
+
+    and hence:
+
+    3 - alphabetical ascending (same as 1)
+    5 - alphabetical descending
+    6 - not allowed (can't have ascending and descending)
+    7 - not allowed, same as above
+
+    If no ordering options are specified, then ordering is defaulted to 
+    ascending order by count of occurences.
+    """
+#Construct initial ArgumentParser object
+    argparser = argparse.ArgumentParser(description = (
+    "Reads input from stdin, or a file if specified, and"
+        " splits input into words containing alphabetic char"
+        "acters, and outputs pairs of words along with their"
+        " number of occurences to stdout. Words are defined"
+    " as contiguous sequences of characters from the "
+    "alphabet [a-zA-z'], any other character will act as a"
+    " separator. Output can be sorted in various fashions"
+    " as specified by the command line options, and "
+    "consists of one word-count pair per line, with the "
+    "word and its count of occurences separated by a "
+    "single tab."))
+#As specifying ascending and descending at the same time makes no sense
+#we add these two options to a mutually exclusive group so that the 
+#argparse module will complain if both are specified together.
+    asc_or_desc = argparser.add_mutually_exclusive_group()
+    asc_or_desc.add_argument('--ascend', action = 'append_const',
+        const = 2, dest = 'order', help = ("Returns output "
+        "sorted in ascending order by counts of occurrences,"
+    " this is the default behavior of wordcount."))
+    asc_or_desc.add_argument('--descend', action = 'append_const',
+        const = 4, dest = 'order', help = ("Returns output "
+        "sorted in descending order by counts of occurrences,"
+    " or in reverse alphabetic order if specified along "
+    "with --descend."))
+    argparser.add_argument('--alpha', action = 'append_const',
+        const = 1, dest = 'order', help =("Returns output "
+        "sorted alphabetically by word. If specified along"
+        " with --descend, output is sorted in reverse alpha"
+        "betic order. Specifying --alpha and --ascend gives"
+        " the same results as only --alpha."))
+#Just for my own learning, added an option to read input from a file
+#if desired.
+    argparser.add_argument('--in_file',action ='store',help=(
+        "Optionally specifies a file to read input from. Reads from stdin if "
+    "--in_file is not specified."))
+    options = argparser.parse_args()
+    return options
+    
+def print_dict(words, order):
+    """Prints a dictionary of word-count pairs according to the specified order.
+
+    print_dict takes in two arguments:
+
+    words - a defaultdict(int) containing word-count pairs as key-value pairs
+    order - an integer specifying the output ordering, as defined in parse_args()
+
+    print_dict then uses these two arguments to output the contents of 'words' 
+    to stdout in the order specified by 'order' in a list of word-count pairs, 
+    one pair per line, with the word and its count of occurences separated by 
+    a single tab character.
+    """
+#In the case of alphabetical ordering (ascending or descending) we only
+#need to sort the dict once, as this uniquely determines the order of 
+#the dict since each word has only one entry in the dict. We start by
+#assuming a second sort is necessary (output sorted by counts), hence
+#second_sort is intialized to True.
+    second_sort = True
+#As we may need to sort in descending order by counts and ascending order
+#by words, we need two separate booleans to specify whether the numerical
+#and alphabetical sorts are ascending or descending respectively.
+    num_descend = False
+    alpha_descend = False
+#If order has a 1 bit, then we're sorting alphabetically (see parse_args())
+#hence second_sort is False as no numerical sort is needed.
+    if 0b1 & order:
+        second_sort = False
+#If order has a 2 bit, then --ascend was specified, as this is the default
+#behavior, we simply pass.
+    if 0b10 & order:
+        pass
+#If order has a 4 bit, then --descend was specified. If --alpha was also
+#specified, then we want the alphabetical sort in descending order,
+#otherwise, we just want the numerical sort in descending order, since 
+#we still want words with the same count to be sorted in ascending 
+#alphabetical order.
+    if 0b100 & order:
+        if not second_sort: alpha_descend=True
+        num_descend = True
+#Perform the first sort alphabetically.
+    sorted_words = sorted(words.items(),key=itemgetter(0), reverse=alpha_descend)
+#If output should be sorted by count, perform second sort on the counts. This
+#gives a list sorted by counts first, and then alphabetically, as sorts in 
+#Python are stable.
+    if second_sort:
+        sorted_words = sorted(sorted_words,key=itemgetter(1),reverse=num_descend)
+#Finally, print each entry of the sorted list, one per line, with the word
+#and its count separated by a single tab.
+    for entry in sorted_words:
+                print("%s\t%d" % (entry[0],entry[1]))
+
+def read_words(input):
+    """Reads from an input stream and yields one word at a time
+
+    This function is a generator that takes an input stream as
+    an input, and reads the input stream one line at a time. For 
+    each line, this function yields each contiguous sequence of 
+    the characters [A-Za-z'], that is any contiguous sequence of
+    apostrophes, and lower or upper-case letters.
+    """
+    for line in input:
+#Regex below matches 1 or more of any of the characters in our alphabet
+        for word in re.findall(r"[A-Za-z']+", line):
+            yield word
+
+def main(args):
+    """Main function to direct overall program execution.
+
+    Responsible for calling all other functions, also
+    opens input file for reading if given, and receives
+    words yielded by read_word and increments the 
+    appropriate word's count in the dictionary of 
+    word-count pairs.
+    """
+#First parse our arguments, returning opts, the argparse Namespace object
+    opts = parse_arg()
+#Next prepare input stream for reading, in_file is either stdin
+#if no file is specified, or the specified file if found.
+    in_file=""
+    if opts.in_file == None: in_file = sys.stdin
+    else:
+        try:
+            in_file = open(opts.in_file, 'r')
+        except (OSError,IOError) as e:
+            print("ERROR File not found: %s" % (opts.in_file),file=sys.stderr)
+            sys.exit(1)
+#Initialize our dictionary of word-count pairs
+    words = collections.defaultdict(int)
+#For each word read in, increment its count by 1
+    for word in read_words(in_file):
+        words[word] += 1
+#As the output order information is initially stored as a list
+#of powers of 2, we need to sum these up to a single number 
+#for quicker option checking
+    order=0
+    if not opts.order is None:
+        for num in opts.order:
+            order+=num
+#Finally, print the dictionary of word-count pairs in the specified order
+    print_dict(words, order)
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
